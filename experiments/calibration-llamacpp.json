@@ -1,0 +1,45 @@
+{
+    "name":  "calibration-llamacpp",
+    "description":  "Dose-response calibration of every technique on a small GGUF model (llama.cpp backend).",
+    "backend":  "llamacpp",
+    "model":  "qwen2.5-0.5b",
+    "techniques":  [
+                       "placebo",
+                       "hallucinogen",
+                       "depressant",
+                       "amnesia",
+                       "stimulant",
+                       "dissociative",
+                       "delirium",
+                       "delusion",
+                       "paranoia",
+                       "creativity"
+                   ],
+    "doses":  [
+                  0,
+                  50,
+                  150,
+                  500
+              ],
+    "trials":  2,
+    "sampling":  {
+                     "temperature":  0.7,
+                     "max_tokens":  96
+                 },
+    "seed":  42,
+    "prompts":  [
+                    {
+                        "prompt":  "Explain in three sentences why the sky is blue.",
+                        "expected":  "scatter"
+                    },
+                    {
+                        "prompt":  "Alice has 3 apples and buys 5 more, then gives 2 away. How many apples does she have? Explain briefly.",
+                        "expected":  "6"
+                    },
+                    {
+                        "expected":  "7391",
+                        "memory":  "Project notes: the vault access code is 7391. The team meeting is in room B12 on Thursday at 3 pm. The project lead is Dana Ortiz, and the budget is 48,000 euros.",
+                        "prompt":  "Using the project notes, answer: what is the vault access code, where and when is the meeting, and who leads the project?"
+                    }
+                ]
+}

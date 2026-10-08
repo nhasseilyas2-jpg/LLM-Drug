@@ -105,6 +105,7 @@
       </div>
       <div class="row sweep">
         <label>Agent steps <input id="steps" type="number" min="1" max="12" value="4"></label>
+          <label title="The effective dose shrinks by this fraction at every agent step">Tolerance per step (%) <input id="tolerance" type="number" min="0" max="90" step="5" value="0"></label>
         <button id="runAgent" type="button">Agent loop</button>
       </div>
       <div id="progress" class="progress hidden">

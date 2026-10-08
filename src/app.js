@@ -192,7 +192,8 @@ function currentInput() {
     doses: parseDoseList($("doses").value),
     trials: num("trials"),
     reseedInjection: $("reseed").checked,
-    steps: num("steps")
+    steps: num("steps"),
+    tolerance: num("tolerance") / 100
   };
 }
 
@@ -347,7 +348,7 @@ function renderSweep(r) {
 }
 
 function renderAgent(r) {
-  return header(r) + r.steps.map((s) => `<h3>Step ${s.step} <span class="hint">divergence ${fmt(s.metrics.divergence)} · impairment ${fmt(s.metrics.impairment, 1)}${s.metrics.clean?.treated?.surprisal !== undefined ? ` · clean surprisal ${fmt(s.metrics.clean.treated.surprisal)} (baseline ${fmt(s.metrics.clean.baseline?.surprisal)})` : ""}</span></h3>` +
+  return header(r) + r.steps.map((s) => `<h3>Step ${s.step} <span class="hint">${s.effectiveDoseMg !== undefined && s.effectiveDoseMg !== r.doseMg ? `dose ${fmt(s.effectiveDoseMg, 1)} mg · ` : ""}divergence ${fmt(s.metrics.divergence)} · impairment ${fmt(s.metrics.impairment, 1)}${s.metrics.clean?.treated?.surprisal !== undefined ? ` · clean surprisal ${fmt(s.metrics.clean.treated.surprisal)} (baseline ${fmt(s.metrics.clean.baseline?.surprisal)})` : ""}</span></h3>` +
     arms([["Baseline trajectory", s.baseline.content], ["Treated trajectory", s.treated.content]])).join("") +
     auditBlock(r.treatment, r.steps[r.steps.length - 1]?.treated.engine);
 }
@@ -400,7 +401,7 @@ export function recordToCsv(r) {
     m.treated.garble, m.treated.repetition, m.treated.scriptSwitch, m.anchor ? m.anchor.treated : "", m.internal?.treated?.entropy ?? "", m.internal?.treated?.surprisal ?? "", m.clean?.treated?.surprisal ?? "", m.clean?.baseline?.surprisal ?? "", m.treated.words].join(",");
   const rows = r.type === "run" ? [line(r.doseMg, 0, r.arms.treated.seed, r.intensity, r.metrics)]
     : r.type === "dose-response" ? r.rows.map((row) => line(row.doseMg, row.trial, row.seed, row.intensity, row.metrics))
-    : r.steps.map((s) => line(r.doseMg, s.step, s.treated.seed, r.intensity, s.metrics));
+    : r.steps.map((s) => line(s.effectiveDoseMg ?? r.doseMg, s.step, s.treated.seed, s.intensity ?? r.intensity, s.metrics));
   return `${head.join(",")}\n${rows.join("\n")}\n`;
 }
 

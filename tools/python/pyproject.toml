@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-injection-lab"
+version = "0.1.0"
+description = "Load LLM Injection Runtime Lab history and drive its local HTTP API"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+pandas = ["pandas>=1.5"]
+
+[tool.setuptools]
+packages = ["llm_injection_lab"]

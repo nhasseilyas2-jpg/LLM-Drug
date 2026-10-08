@@ -18,45 +18,46 @@ the issues that remain open, and the research roadmap.
 | 9 | Medium | Single prompt, single run: no repeated trials or uncertainty. | — | Dose-response sweeps with trials, shared baselines, bootstrap CIs, CSV/JSON export, headless runner. |
 | 10 | Medium | Ollama "techniques" presented as equivalent to internal ones. | 30B model unaffected at 400 mg. | Per-technique support level (full / approximate / none); unsupported techniques are rejected with 400. |
 | 11 | Medium | UI used inline scripts/styles, no CSP; history was an unbounded JSON array rewritten on every run. | — | Strict CSP, no inline code; append-only JSONL with rotation, corrupt-line tolerance and legacy-record mapping. |
-| 12 | Low | No tests for the actual behaviour (tests only checked string formatting). | — | 60 C++ unit tests, 38 Node unit/integration tests, 10 e2e tests against the real engine. |
+| 12 | Low | No tests for the actual behaviour (tests only checked string formatting). | — | 132 C++ engine checks, 49 Node unit/integration tests, 24 e2e tests against the real engine, 5 Python client tests. |
 | 13 | Low | Mis-encoded text (double UTF-8) in technique descriptions. | `Ã‚Â·` in the UI. | Fixed; a test now rejects encoding damage. |
 
 ## Known open issues
 
-- **Graph-site noise is activation-derived.** Residual noise and FFN dropout use `sin(K·x + φ)`
-  instead of true RNG (ggml has no per-element RNG op). It is reproducible and well spread, but
-  correlated with the input. A custom ggml op or a precomputed noise tensor would remove this.
-- **Logprobs exclude logit-site perturbations** (llama-server reports pre-sampler logprobs).
-- **About 31 architectures do not call `build_cvec`**, so residual sites never fire there. The audit
-  line makes this visible, but a generic hook would be better.
-- **No KV forgetting for recurrent/hybrid models.**
-- **CPU-first.** GPU builds (`-Cuda`, `-Vulkan`, `--metal`) compile but were not benchmarked here.
-- **One process per configuration.** Each new dose starts a new `llama-server` (about 1–3 s for
-  small models, longer for large ones). A per-request configuration API inside llama-server would
-  remove this cost.
-- **Calibration on one small model.** Constants and EC50 values were tuned on qwen2.5-0.5b-instruct.
-- **Impairment weights are ad hoc.** Use individual metrics and the judge for analysis.
-- **Patch maintenance.** The patch is pinned to one llama.cpp commit and needs rebasing for newer versions.
+Status: ✅ resolved · 🟡 partly resolved · ⏳ open (with the reason).
+
+| Issue | Status |
+|---|---|
+| **Graph-site noise is activation-derived** (`sin(K·x + φ)`). | ✅ `LLM_INJ_NOISE_MODE=hash` uses a counter-hash ggml custom op: an independent draw per (seed, layer, channel). The default stays `sin`, because custom ops run on the CPU backend. |
+| **One process per configuration** (1–3 s restart per dose). | ✅ Shared mode: one `llama-server` per model re-reads `LLM_INJ_CONFIG_FILE` at each request (`config gen=N`). Used by default; `LLAMA_SHARED=0` restores the old behaviour. |
+| **Calibration on one small model.** | 🟡 Benchmark curves for qwen2.5-0.5b (13 techniques) and a reduced run on qwen3-coder:30b (MoE) are in [METHODOLOGY](METHODOLOGY.md#benchmark-robustness-curves). Dense 7B–70B models and per-model EC50 fitting are still open: no such GGUF was available here, and CPU-only runs of large dense models are slow. |
+| **Logprobs exclude logit-site perturbations** (llama-server reports pre-sampler logprobs). | 🟡 Clean-model surprisal now scores treated text with the untreated model, so it covers logit-site techniques too. The raw logprob caveat remains, since changing it would mean changing llama-server's reporting. |
+| **About 31 architectures do not call `build_cvec`**, so residual and steering sites never fire there. | ⏳ The audit line ("site fired") makes this visible. A generic hook needs a patch in every model builder, which is a large maintenance surface for a pinned patch. Attention, head, FFN, KV and logit sites work everywhere. |
+| **No KV forgetting for recurrent/hybrid models.** | ⏳ Mamba/RWKV have no KV mask to edit. A state-decay analogue would be needed. There is no such model to test with here. |
+| **CPU-first.** GPU builds compile but are not benchmarked. | 🟡 The release workflow adds a Vulkan compile check and a Metal build on macOS. GPU runtime benchmarks need GPU runners or hardware, which were not available. Hash-noise mode is CPU-bound by design. |
+| **Impairment weights are ad hoc.** | 🟡 Still a coarse summary, but analysis no longer depends on it: the benchmark measures task accuracy directly, and clean surprisal gives a model-internal measure. |
+| **Patch maintenance** (pinned to one llama.cpp commit). | ⏳ Inherent. CI applies the patch to the pinned commit on every push; rebasing is manual. |
+| Ollama sampler mapping is approximate. | ⏳ By design: the Ollama API exposes no logits or activations. Documented as "sampling stress". |
 
 ## Roadmap
 
 Ordered roughly by research value.
 
-1. **Clean-model surprisal.** Score the treated text with the *untreated* model
-   (perplexity of the treated output under the clean model). This is a model-internal, dose-blind
-   measure of how "unlike itself" the output is, and works for logit-site techniques too.
-2. **Activation steering techniques.** Load control vectors (llama.cpp already supports
-   `--control-vector`) and expose them as dose-scaled techniques, e.g. mood or persona shifts. This
-   is the closest analogue to receptor-specific drugs.
-3. **Head- and neuron-level targeting.** Per-head attention ablation/scaling and targeted FFN
-   neuron dropout, for localized "lesions" and interpretability experiments.
-4. **Per-request injection configuration** in llama-server, removing the process-per-dose cost and
-   enabling dose changes inside one generation ("onset", "wear-off", "half-life" curves).
-5. **Pharmacokinetics.** Dose that changes over generated tokens (absorption/elimination curves),
-   tolerance across agent steps, and combinations of two techniques (interaction effects).
-6. **Benchmarks under perturbation.** Run standard task sets (GSM8K, MMLU subsets, tool-use tasks)
-   at several doses and report robustness curves per model.
-7. **Recalibration on larger models** (7B–70B), plus matched-impairment comparisons across models.
-8. **True RNG for graph sites** (custom ggml op) and a generic residual hook for all architectures.
-9. **GPU CI** and prebuilt patched binaries for Windows/Linux/macOS.
-10. **Notebook / Python client** for analysis of exported JSONL/CSV.
+| # | Item | Status |
+|---|---|---|
+| 1 | **Clean-model surprisal**: perplexity of the treated output under the untreated model. | ✅ Grammar-forced teacher forcing against the clean server, for every arm and in sweeps and agent loops. In the CSV and Python exports. |
+| 2 | **Activation steering techniques** (receptor-specific "drugs"). | ✅ `steer` engine site (GGUF control vectors, raw-vector scaling), `npm run vectors` (persona-pair prompt sets → `llama-cvector-generator`), `euphoria` / `dysphoria` techniques, and steering-aware combinations. More vectors only need a new `steering/<name>.json`. |
+| 3 | **Head- and neuron-level targeting** (lesions). | ✅ `HEAD_LESION` / `HEAD_IDS` / `HEAD_GAIN` / `HEAD_LAYERS` and `FFN_LESION`. Techniques `neurotoxin` (diffuse) and `stroke` (focal band). |
+| 4 | **Per-request injection configuration**, and dose changes inside one generation. | ✅ Shared mode (reloadable config file) and the in-generation PK time course. |
+| 5 | **Pharmacokinetics**: onset/half-life over tokens, tolerance across agent steps, combinations. | ✅ `PK_ONSET` / `PK_HALFLIFE`, agent `tolerance` (dose·(1−tol)^step), and co-administration with per-knob merge rules. All in the UI and API. |
+| 6 | **Benchmarks under perturbation.** | 🟡 `npm run bench`: an exact-answer set with Wilson CIs and D50 per technique, JSON+Markdown output. Standard sets (GSM8K, MMLU) and tool-use tasks are not bundled, because of licensing and size. The task file format (`{id, q, a[]}`) accepts them directly via `--tasks`. |
+| 7 | **Recalibration on larger models** and matched-impairment comparison. | 🟡 See "Calibration on one small model" above. D50 per technique is the matched-impairment measure; comparing models means comparing their D50 tables. |
+| 8 | **True RNG for graph sites** and a generic residual hook. | 🟡 True RNG is done (hash mode). The generic residual hook is open (see above). |
+| 9 | **GPU CI** and prebuilt binaries for Windows/Linux/macOS. | 🟡 `.github/workflows/release.yml` builds and packages `llama-server` + `llama-cvector-generator` for all three OSes on `v*` tags, plus a Vulkan compile job. It has not been executed yet: it needs a push to GitHub, and it cannot run locally. GPU *runtime* CI needs self-hosted GPU runners. |
+| 10 | **Notebook / Python client.** | ✅ `tools/python` (stdlib-only, pandas optional): `load_history`, `flatten` / `to_dataframe` with the same columns as the CSV export, and `LabClient` for the HTTP API (submit, wait, cancel). Tested in CI. |
+
+### Next ideas
+
+- More steering vectors (anxiety/calm, confidence/doubt, honesty) and a UI to choose a vector.
+- Sparse-autoencoder feature clamping as a more selective "receptor" site.
+- Withdrawal and rebound: an opposite steering pulse after the half-life.
+- Per-token traces of the PK factor and fired sites, visualized along the response.

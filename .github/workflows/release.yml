@@ -1,0 +1,82 @@
+name: Release
+
+# Builds the patched llama-server + llama-cvector-generator for Windows, Linux and macOS
+# and attaches them to the GitHub release for a v* tag. Run manually to get the archives
+# as workflow artifacts without publishing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x64-cpu
+          - os: windows-latest
+            name: windows-x64-cpu
+          - os: macos-14
+            name: macos-arm64-metal
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: bash scripts/setup-llamacpp-injection.sh --test
+      - name: Build (macOS, Metal)
+        if: runner.os == 'macOS'
+        run: bash scripts/setup-llamacpp-injection.sh --metal --test
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # The script is written for Windows PowerShell; judge success by the binary, not the exit code.
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/setup-llamacpp-injection.ps1 -Test
+          if (-not (Test-Path vendor/llama.cpp/build/bin/Release/llama-server.exe)) { exit 1 }
+          $global:LASTEXITCODE = 0
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="llm-injection-${{ matrix.name }}"
+          mkdir -p "$out"
+          bin=vendor/llama.cpp/build/bin
+          [ -d "$bin/Release" ] && bin="$bin/Release"
+          # Executables plus any shared libraries they were linked against.
+          find "$bin" -maxdepth 1 -type f \( -name 'llama-server*' -o -name 'llama-cvector-generator*' -o -name '*.dll' -o -name '*.so*' -o -name '*.dylib' -o -name '*.metal' \) -exec cp {} "$out/" \;
+          cp LICENSE llamacpp-injection/README.md "$out/"
+          cp llamacpp-injection/patches/LLAMA_CPP_COMMIT "$out/"
+          ls -la "$out"
+          if [ "${{ runner.os }}" = "Windows" ]; then 7z a "$out.zip" "$out" >/dev/null; else tar czf "$out.tar.gz" "$out"; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llm-injection-${{ matrix.name }}
+          path: llm-injection-${{ matrix.name }}.*
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: llm-injection-${{ matrix.name }}.*
+
+  vulkan-compile:
+    # Compile check only; hosted runners have no GPU to run it on.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Vulkan SDK
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update -q
+          sudo apt-get install -y -q vulkan-sdk
+      - run: bash scripts/setup-llamacpp-injection.sh --vulkan

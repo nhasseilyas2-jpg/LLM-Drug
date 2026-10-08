@@ -17,6 +17,9 @@ those drug classes disturb different parts of cognition:
 | Dissociative | a band of middle layers progressively switched off |
 | Delirium | feed-forward dropout + vetoed top token |
 | Delusion / Paranoia | persistent bias toward a theme vocabulary |
+| Neurotoxin | a growing, fixed set of attention heads and FFN channels silenced in every layer |
+| Stroke | a focal lesion: most heads and FFN channels silenced in a band of middle layers |
+| Euphoria / Dysphoria | a "mood" control vector added to the residual stream (activation steering) |
 | Creativity | flatter distribution + light late-layer noise |
 | Placebo | nothing (control) |
 
@@ -34,22 +37,28 @@ The analogy is a mnemonic only; every run records the exact low-level parameters
  ┌──────────┐   ┌───────────────────────┐   ┌──────────────┐
  │ Baseline │   │ Noise floor (seed+Δ)  │   │   Treated    │  ← LLM_INJ_* env from technique × dose
  └────┬─────┘   └──────────┬────────────┘   └──────┬───────┘
-      └─────── untreated llama-server ──┘   patched llama-server (logits, attention,
-                                             residual stream, FFN, KV memory)
-                         ↓ metrics (output-only) · blind judge · history
+      └─────── untreated llama-server ──┘   patched llama-server (logits, attention, heads,
+                                             residual stream, FFN, KV memory, steering)
+                         ↓ metrics (output-only) · clean-model surprisal · blind judge · history
 ```
 
 - **Patched llama.cpp backend (full).** A small engine compiled into llama.cpp perturbs
-  [six injection sites](llamacpp-injection/README.md). Dose maps to intensity with a Hill curve.
+  [eight injection sites](llamacpp-injection/README.md). Dose maps to intensity with a Hill curve.
+  One `llama-server` per model is reconfigured per request (no restart per dose).
 - **Ollama backend (approximate).** Only sampling options can be changed (temperature, top-p,
   top-k, mirostat, context length). Useful as "sampling stress"; it cannot reach model internals.
 - **Controls.** Baseline, placebo, and a noise-floor arm measure ordinary sampling variability.
 - **Metrics.** Divergence beyond the noise floor, garble, repetition, script switching, expected-
-  answer hit, logprob entropy/confidence, a composite impairment score and an optional blind
-  LLM judge. Nothing is derived from the dose. See [METHODOLOGY](docs/METHODOLOGY.md).
-- **Modes.** Single trial, dose-response sweep with bootstrap CIs, multi-step agent loop.
+  answer hit, logprob entropy/confidence, surprisal of the treated text under the *clean* model,
+  a composite impairment score and an optional blind LLM judge. Nothing is derived from the dose.
+  See [METHODOLOGY](docs/METHODOLOGY.md).
+- **Pharmacology.** Co-administer two techniques (interaction effects), give a treatment an onset
+  and half-life in tokens (the response starts sober, peaks, wears off), and add tolerance across
+  agent steps.
+- **Modes.** Single trial, dose-response sweep with bootstrap CIs, multi-step agent loop, and an
+  exact-answer benchmark with Wilson CIs and D50 per technique.
 - **Reproducible.** Seeds everywhere, full parameter audit, JSONL history, CSV/JSON export,
-  headless experiment runner.
+  headless experiment runner, and a [Python client](tools/python/README.md) for analysis.
 
 ## Quick start
 
@@ -63,7 +72,10 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-llamacpp-injection.ps1 -T
 
 # 2. Put one or more .gguf models in models\  (models already pulled with Ollama are found automatically)
 
-# 3. Start the lab
+# 3. (Optional) Make the steering vector for euphoria/dysphoria (~1 min for a 0.5B model on CPU)
+npm run vectors -- --model qwen2.5-0.5b --vector mood
+
+# 4. Start the lab
 npm start        # → http://localhost:4173
 ```
 
@@ -80,7 +92,9 @@ No dependencies are installed: the lab uses only Node built-ins.
 3. **Run trial** shows baseline, noise floor and treated output side by side, with metrics, the
    applied engine parameters and the sites that actually fired.
 4. **Dose sweep** runs several doses × trials and plots impairment with 95 % CIs.
-5. **Agent loop** runs a multi-step objective on both arms and scores each step.
+5. **Agent loop** runs a multi-step objective on both arms and scores each step. *Tolerance*
+   lowers the dose on every step.
+6. Optionally pick a *co-administered* technique and dose, and an *onset* / *half-life* (tokens).
 
 Every result is saved to `data/runs.jsonl` and can be exported as CSV or JSON.
 
@@ -93,6 +107,25 @@ npm run experiment -- experiments\ollama-sampler.json --model qwen3-coder
 
 Results are written to `data/experiments/` as JSON and CSV. The spec format is in
 `experiments/*.json` (backend, model, techniques, doses, trials, sampling, seed, prompts).
+
+### Benchmark
+
+```powershell
+npm run bench                                                   # smallest model, all techniques
+npm run bench -- --model qwen3-coder --techniques delirium,amnesia --doses 0,150,500 --limit 10
+```
+
+It runs 30 short exact-answer tasks (`bench/exact-answer.json`: arithmetic, facts, word tasks) with
+greedy decoding at each dose. It reports accuracy with Wilson 95 % intervals and the D50 (the dose
+at which accuracy falls to half of the 0 mg accuracy) per technique. Output goes to
+`data/bench/<time>-<model>.{json,md}`.
+
+### Python
+
+```bash
+pip install -e tools/python
+python -c "from llm_injection_lab import load_history, flatten; print(len(flatten(load_history('data/runs.jsonl'))))"
+```
 
 ### Using the engine without the lab
 
@@ -111,7 +144,10 @@ vendor\llama.cpp\build\bin\Release\llama-server.exe -m models\model.gguf
 | `OLLAMA_URL` / `OLLAMA_MODELS` | `http://127.0.0.1:11434` / `~/.ollama/models` | Ollama API and blob store |
 | `LLAMA_THREADS`, `LLAMA_CTX`, `LLAMA_GPU_LAYERS` | auto, 4096, — | llama-server settings |
 | `LLAMA_MAX_SERVERS` | 2 | llama-server processes kept warm |
+| `LLAMA_SHARED` | 1 | `0` = one process per (model, setting) instead of per-request reconfiguration |
+| `LLAMA_CVECTOR_BIN` | next to `llama-server` | `llama-cvector-generator` used by `npm run vectors` |
 | `LAB_DATA_DIR` | `data` | history and experiment output |
+| `LAB_STEERING_DIR` | `data/steering` | control vectors, one folder per model id |
 
 ## API
 
@@ -130,13 +166,16 @@ Models are referenced by id (`gguf:<hash>` or `ollama:<name>`), never by path.
 ## Development
 
 ```powershell
-npm test            # 38 unit + integration tests (no model needed)
-npm run test:e2e    # 10 tests against the real patched engine (skipped if not built)
+npm test            # 49 unit + integration tests (no model needed)
+npm run test:e2e    # 24 tests against the real patched engine (skipped if not built)
 npm run build       # static bundle in dist/
 node scripts/gen-techniques-doc.mjs   # regenerate docs/TECHNIQUES.md from the catalog
 ```
 
-Engine unit tests: see [llamacpp-injection/README.md](llamacpp-injection/README.md#unit-tests).
+Engine unit tests (132 checks): see [llamacpp-injection/README.md](llamacpp-injection/README.md#unit-tests).
+Python client tests: `cd tools/python; python -m unittest discover -s tests`.
+Release binaries: push a `v*` tag; `.github/workflows/release.yml` builds Windows, Linux and macOS
+archives and a Vulkan compile check.
 
 ## Documentation
 

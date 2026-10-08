@@ -238,6 +238,18 @@ test("runAgent produces paired baseline/treated trajectories", async () => {
   assert.equal(r.steps.length, 3);
   assert.equal(lab.calls.length, 6);
   assert.ok(r.steps.every((s) => s.metrics.divergence > 0.5));
+  assert.ok(r.steps.every((s) => s.effectiveDoseMg === 400));
+});
+
+test("runAgent: tolerance lowers the effective dose at every step", async () => {
+  const lab = mockLab();
+  const r = await runAgent(lab, validateInput({ ...base, steps: 3, doseMg: 400, tolerance: 0.5, coTechniqueId: "amnesia", coDoseMg: 200 }, "agent"));
+  assert.deepEqual(r.steps.map((s) => s.effectiveDoseMg), [400, 200, 100]);
+  assert.ok(r.steps[0].intensity > r.steps[1].intensity && r.steps[1].intensity > r.steps[2].intensity);
+  const forget = lab.calls.filter((c) => c.env.LLM_INJ_KV_FORGET).map((c) => Number(c.env.LLM_INJ_KV_FORGET));
+  assert.ok(forget.length === 3 && forget[0] > forget[1] && forget[1] > forget[2], "co-technique dose shrinks too");
+  assert.equal(validateInput({ ...base, tolerance: 7 }, "agent").tolerance, 0.9);
+  assert.equal(validateInput({ ...base, tolerance: "x" }, "agent").tolerance, 0);
 });
 
 test("cancellation propagates through the job queue", async () => {

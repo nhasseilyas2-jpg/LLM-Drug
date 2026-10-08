@@ -16,3 +16,7 @@ Thumbs.db
 .vscode/
 .idea/
 build/
+
+# Python
+__pycache__/
+*.egg-info/

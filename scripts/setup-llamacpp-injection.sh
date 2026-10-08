@@ -38,8 +38,17 @@ if git -C "$DIR" apply --check --reverse "$PATCH" 2>/dev/null; then
   echo "Injection patch already applied."
 else
   if [ "$SKIP_CHECKOUT" = 0 ]; then
-    if [ -n "$(git -C "$DIR" status --porcelain --untracked-files=no)" ]; then
-      echo "$DIR has local changes; commit/stash them or use --dir with a clean checkout." >&2; exit 1
+    DIRTY="$(git -C "$DIR" diff --name-only)"
+    if [ -n "$DIRTY" ]; then
+      # an older version of the injection patch: every modified file carries our marker -> restore and re-apply
+      for f in $DIRTY; do
+        if ! grep -q "llm-injection" "$DIR/$f"; then
+          echo "$DIR has local changes; commit/stash them or use --dir with a clean checkout." >&2; exit 1
+        fi
+      done
+      echo "Removing a previous version of the injection patch"
+      # shellcheck disable=SC2086
+      git -C "$DIR" checkout -- $DIRTY
     fi
     git -C "$DIR" cat-file -e "$COMMIT^{commit}" 2>/dev/null || git -C "$DIR" fetch origin "$COMMIT"
     git -C "$DIR" -c advice.detachedHead=false checkout "$COMMIT"
@@ -51,7 +60,7 @@ cp "$INJ/src/llm-injection.h" "$INJ/src/llm-injection.cpp" "$INJ/src/llm-injecti
 
 cmake -S "$DIR" -B "$DIR/build" -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF \
   -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON ${EXTRA[@]+"${EXTRA[@]}"}
-cmake --build "$DIR/build" --config Release --target llama-server -j "$JOBS"
+cmake --build "$DIR/build" --config Release --target llama-server llama-cvector-generator -j "$JOBS"
 echo "Built: $DIR/build/bin/llama-server"
 
 if [ "$RUN_TESTS" = 1 ]; then

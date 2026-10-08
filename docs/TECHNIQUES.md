@@ -17,6 +17,9 @@ Intensity `E` is in [0, 1). `0 mg` always means *no intervention*.
 | Residual stream | Hidden state at the end of transformer blocks |
 | Feed-forward | Output units of dense / MoE feed-forward blocks |
 | KV memory | Attention mask over cached past tokens |
+| Attention heads | Per-head attention outputs (lesion / gain), before the output projection |
+| FFN lesion | A fixed set of feed-forward output channels, silenced for every token |
+| Steering vector | A per-layer control vector added to the residual stream of every token (needs npm run vectors) |
 | Sampler settings | Ollama sampling options (temperature, top-p, ...) |
 
 ## Summary
@@ -32,6 +35,10 @@ Intensity `E` is in [0, 1). `0 mg` always means *no intervention*.
 | [Delirium](#delirium) (`delirium`) | ffn, logits | 160 | 2 | approximate |
 | [Delusion](#delusion) (`delusion`) | logits, attention | 140 | 1.6 | none |
 | [Paranoia](#paranoia) (`paranoia`) | logits, attention | 140 | 1.6 | none |
+| [Neurotoxin](#neurotoxin) (`neurotoxin`) | heads, lesion | 180 | 2 | none |
+| [Stroke](#stroke) (`stroke`) | heads, lesion | 150 | 2.5 | none |
+| [Euphoria](#euphoria) (`euphoria`) | steer | 150 | 1.5 | none |
+| [Dysphoria](#dysphoria) (`dysphoria`) | steer | 150 | 1.5 | none |
 | [Creativity](#creativity) (`creativity`) | logits, residual | 150 | 1.5 | approximate |
 
 <a id="placebo"></a>
@@ -227,6 +234,90 @@ Default theme words: `watching`, `danger`, `threat`, `suspicious`, `conspiracy`,
 | 150 mg | 0.528 | `LLM_INJ_FIXATION_BIAS=3.16541`<br>`LLM_INJ_LOGIT_NOISE=0.10551`<br>`LLM_INJ_ATTN_SCALE=1.13189`<br>`LLM_INJ_FIXATION_IDS=…` |
 | 300 mg | 0.772 | `LLM_INJ_FIXATION_BIAS=4.63177`<br>`LLM_INJ_LOGIT_NOISE=0.15439`<br>`LLM_INJ_ATTN_SCALE=1.19299`<br>`LLM_INJ_FIXATION_IDS=…` |
 | 500 mg | 0.885 | `LLM_INJ_FIXATION_BIAS=5.30761`<br>`LLM_INJ_LOGIT_NOISE=0.17692`<br>`LLM_INJ_ATTN_SCALE=1.22115`<br>`LLM_INJ_FIXATION_IDS=…` |
+
+**Ollama (none):** not available — this technique acts on model internals that Ollama does not expose.
+
+<a id="neurotoxin"></a>
+## Neurotoxin
+
+*Excitotoxic damage: neurons die and stay dead, scattered across the whole cortex.*
+
+Permanently silences a growing, dose-nested set of attention heads and feed-forward channels in every layer.
+
+**Interventions (llama.cpp):**
+
+- Attention heads: a fraction 0.6·E of heads in every layer ablated (output × 0); the set grows monotonically with dose
+- Feed-forward: a fixed fraction 0.3·E of output channels silenced in every layer
+
+| Dose | E | Engine environment |
+|---|---|---|
+| 50 mg | 0.072 | `LLM_INJ_HEAD_LESION=0.04298`<br>`LLM_INJ_HEAD_GAIN=0`<br>`LLM_INJ_FFN_LESION=0.02149` |
+| 150 mg | 0.410 | `LLM_INJ_HEAD_LESION=0.2459`<br>`LLM_INJ_HEAD_GAIN=0`<br>`LLM_INJ_FFN_LESION=0.12295` |
+| 300 mg | 0.735 | `LLM_INJ_HEAD_LESION=0.44118`<br>`LLM_INJ_HEAD_GAIN=0`<br>`LLM_INJ_FFN_LESION=0.22059` |
+| 500 mg | 0.885 | `LLM_INJ_HEAD_LESION=0.53116`<br>`LLM_INJ_HEAD_GAIN=0`<br>`LLM_INJ_FFN_LESION=0.26558` |
+
+**Ollama (none):** not available — this technique acts on model internals that Ollama does not expose.
+
+<a id="stroke"></a>
+## Stroke
+
+*A focal infarct: one region is knocked out completely while the rest of the brain is intact.*
+
+A focal lesion: most attention heads and feed-forward channels in a narrow band of middle layers are silenced.
+
+**Interventions (llama.cpp):**
+
+- Attention heads: a fraction 0.9·E of heads ablated in layers at depth 0.4–0.6
+- Feed-forward: 0.8·E of output channels silenced in the same band
+
+| Dose | E | Engine environment |
+|---|---|---|
+| 50 mg | 0.060 | `LLM_INJ_HEAD_LESION=0.05425`<br>`LLM_INJ_HEAD_GAIN=0`<br>`LLM_INJ_HEAD_LAYERS=0.4:0.6`<br>`LLM_INJ_FFN_LESION=0.04823`<br>`LLM_INJ_FFN_LAYERS=0.4:0.6` |
+| 150 mg | 0.500 | `LLM_INJ_HEAD_LESION=0.45`<br>`LLM_INJ_HEAD_GAIN=0`<br>`LLM_INJ_HEAD_LAYERS=0.4:0.6`<br>`LLM_INJ_FFN_LESION=0.4`<br>`LLM_INJ_FFN_LAYERS=0.4:0.6` |
+| 300 mg | 0.850 | `LLM_INJ_HEAD_LESION=0.7648`<br>`LLM_INJ_HEAD_GAIN=0`<br>`LLM_INJ_HEAD_LAYERS=0.4:0.6`<br>`LLM_INJ_FFN_LESION=0.67982`<br>`LLM_INJ_FFN_LAYERS=0.4:0.6` |
+| 500 mg | 0.953 | `LLM_INJ_HEAD_LESION=0.85772`<br>`LLM_INJ_HEAD_GAIN=0`<br>`LLM_INJ_HEAD_LAYERS=0.4:0.6`<br>`LLM_INJ_FFN_LESION=0.76242`<br>`LLM_INJ_FFN_LAYERS=0.4:0.6` |
+
+**Ollama (none):** not available — this technique acts on model internals that Ollama does not expose.
+
+<a id="euphoria"></a>
+## Euphoria
+
+*An MDMA-like mood lift: elevated, effusive, over-friendly affect; at high doses manic, incoherent cheer.*
+
+Adds the model's own 'euphoric minus depressed' activation direction (a control vector) to the residual stream.
+
+**Interventions (llama.cpp):**
+
+- Residual stream: + 2.5·E × mood vector in layers at depth 0.2–0.8
+- Mood vector: mean hidden-state difference between euphoric and depressed personas (steering/mood.json)
+
+| Dose | E | Engine environment |
+|---|---|---|
+| 50 mg | 0.161 | `LLM_INJ_STEER_VEC=mood`<br>`LLM_INJ_STEER_SCALE=0.40348`<br>`LLM_INJ_STEER_LAYERS=0.2:0.8` |
+| 150 mg | 0.500 | `LLM_INJ_STEER_VEC=mood`<br>`LLM_INJ_STEER_SCALE=1.25`<br>`LLM_INJ_STEER_LAYERS=0.2:0.8` |
+| 300 mg | 0.739 | `LLM_INJ_STEER_VEC=mood`<br>`LLM_INJ_STEER_SCALE=1.84699`<br>`LLM_INJ_STEER_LAYERS=0.2:0.8` |
+| 500 mg | 0.859 | `LLM_INJ_STEER_VEC=mood`<br>`LLM_INJ_STEER_SCALE=2.14718`<br>`LLM_INJ_STEER_LAYERS=0.2:0.8` |
+
+**Ollama (none):** not available — this technique acts on model internals that Ollama does not expose.
+
+<a id="dysphoria"></a>
+## Dysphoria
+
+*A depressant come-down: flat, hopeless, withdrawn affect; at high doses bleak perseveration.*
+
+Subtracts the 'euphoric minus depressed' activation direction (the euphoria vector, reversed) from the residual stream.
+
+**Interventions (llama.cpp):**
+
+- Residual stream: − 2.5·E × mood vector in layers at depth 0.2–0.8
+- Mood vector: mean hidden-state difference between euphoric and depressed personas (steering/mood.json)
+
+| Dose | E | Engine environment |
+|---|---|---|
+| 50 mg | 0.161 | `LLM_INJ_STEER_VEC=mood`<br>`LLM_INJ_STEER_SCALE=-0.40348`<br>`LLM_INJ_STEER_LAYERS=0.2:0.8` |
+| 150 mg | 0.500 | `LLM_INJ_STEER_VEC=mood`<br>`LLM_INJ_STEER_SCALE=-1.25`<br>`LLM_INJ_STEER_LAYERS=0.2:0.8` |
+| 300 mg | 0.739 | `LLM_INJ_STEER_VEC=mood`<br>`LLM_INJ_STEER_SCALE=-1.84699`<br>`LLM_INJ_STEER_LAYERS=0.2:0.8` |
+| 500 mg | 0.859 | `LLM_INJ_STEER_VEC=mood`<br>`LLM_INJ_STEER_SCALE=-2.14718`<br>`LLM_INJ_STEER_LAYERS=0.2:0.8` |
 
 **Ollama (none):** not available — this technique acts on model internals that Ollama does not expose.
 

@@ -14,7 +14,8 @@
     "test": "node --test test/*.test.mjs",
     "test:e2e": "node --test test/e2e/*.test.mjs",
     "experiment": "node scripts/experiment.mjs",
-    "inject-env": "node scripts/inject-env.mjs"
+    "inject-env": "node scripts/inject-env.mjs",
+    "vectors": "node scripts/make-control-vectors.mjs"
   },
   "keywords": [
     "llm",

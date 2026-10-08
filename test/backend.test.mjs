@@ -1,17 +1,21 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import test from "node:test";
 import * as metrics from "../src/metrics.js";
 import { JobQueue } from "../lib/server.js";
 import { ValidationError, buildMessages, runAgent, runDoseResponse, runTrial, validateInput } from "../lib/experiment.js";
-import { childEnv, parseAuditLine } from "../lib/llamacpp.js";
+import { childEnv, envText, gbnfLiteral, parseAuditLine, parseEnvText, scorableText, scoreTokens } from "../lib/llamacpp.js";
 import { normalizeRecord } from "../lib/history.js";
+import { listVectors, vectorFile } from "../lib/steering.js";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 const GGUF = "gguf:0123456789abcdef";
 const base = { backend: "llamacpp", modelId: GGUF, techniqueId: "delirium", prompt: "Say hi." };
 
 // Fake runtime: output depends only on whether the arm carries an injection env/options,
 // so tests exercise the experiment wiring without any model.
-function mockLab() {
+function mockLab(config = { steeringDir: path.join(os.tmpdir(), "llm-inj-no-vectors") }) {
   const calls = [];
   const clean = "The answer is blue because of Rayleigh scattering.";
   const reply = (treated, seed) => ({
@@ -23,6 +27,7 @@ function mockLab() {
   });
   return {
     calls,
+    config,
     metrics,
     registry: { gguf: new Map([[GGUF, {}]]), resolveGguf: () => ({ file: "/models/m.gguf", name: "m.gguf" }) },
     pool: {
@@ -30,7 +35,8 @@ function mockLab() {
         calls.push({ kind: "llamacpp", env, seed: req.seed });
         return reply(Object.keys(env).some((k) => k !== "LLM_INJ_SEED"), req.seed);
       },
-      tokenIds: async () => [101, 202]
+      tokenIds: async () => [101, 202],
+      score: async (file, messages, text) => (text.includes("zzq") ? { tokens: 9, surprisal: 8.5 } : { tokens: 9, surprisal: 0.5 })
     },
     ollama: async (model, req) => {
       calls.push({ kind: "ollama", model, options: req.options, seed: req.seed });
@@ -53,7 +59,10 @@ test("validateInput rejects unsafe or malformed requests", () => {
     [{ ...base, prompt: 5 }, /must be a string/],
     [{ ...base, prompt: "x".repeat(20001) }, /too long/],
     [{ ...base, judgeModelId: "gguf:0123456789abcdef" }, /judge/],
-    [{ ...base, backend: "ollama", modelId: "ollama:qwen", techniqueId: "dissociative" }, /no Ollama equivalent/]
+    [{ ...base, backend: "ollama", modelId: "ollama:qwen", techniqueId: "dissociative" }, /no Ollama equivalent/],
+    [{ ...base, coTechniqueId: "cocaine" }, /Unknown coTechniqueId/],
+    [{ ...base, backend: "ollama", modelId: "ollama:qwen", techniqueId: "hallucinogen", coTechniqueId: "creativity" }, /Combinations need/],
+    [{ ...base, backend: "ollama", modelId: "ollama:qwen", techniqueId: "hallucinogen", schedule: { onset: 5 } }, /schedules need/]
   ];
   for (const [body, re] of bad) assert.throws(() => validateInput(body), (e) => e instanceof ValidationError && e.status === 400 && re.test(e.message), JSON.stringify(body)?.slice(0, 80));
 });
@@ -91,6 +100,21 @@ test("parseAuditLine reads all engine audit line kinds", () => {
   assert.equal(audit.warnings.length, 1);
   parseAuditLine("llm-injection: inactive (no LLM_INJ_* set)", audit);
   assert.equal(audit.active, null);
+  // a reloaded configuration starts a fresh audit
+  parseAuditLine("llm-injection: site fired: logits", audit);
+  parseAuditLine("llm-injection: config gen=4", audit);
+  assert.equal(audit.gen, 4);
+  assert.deepEqual(audit.sitesFired, []);
+  assert.deepEqual(audit.warnings, []);
+});
+
+test("envText / parseEnvText round-trip the per-request config file", () => {
+  const env = { LLM_INJ_SEED: "3", LLM_INJ_FIXATION_IDS: "1,2", LLM_INJ_ATTN_LAYERS: "0.2:0.8" };
+  const text = envText(env);
+  assert.equal(text, "LLM_INJ_ATTN_LAYERS=0.2:0.8\nLLM_INJ_FIXATION_IDS=1,2\nLLM_INJ_SEED=3\n");
+  assert.deepEqual(parseEnvText(text), env);
+  assert.equal(envText({}), "");
+  assert.equal(envText({ A: "x\ny" }), "A=x y\n");
 });
 
 test("childEnv strips inherited LLM_INJ_* so baselines are truly untreated", () => {
@@ -123,6 +147,22 @@ test("runTrial: llama.cpp arms use empty baseline env and seeded treated env", a
   assert.ok(r.metrics.impairment > 30);
   assert.ok(r.arms.noise && r.judge.blind);
   assert.deepEqual(steps.slice(0, 3), ["baseline", "noise floor", "treated"]);
+  assert.equal(steps[3], "clean-model surprisal");
+  assert.equal(r.metrics.clean.treated.surprisal, 8.5);
+  assert.equal(r.metrics.clean.baseline.surprisal, 0.5);
+  assert.equal(r.metrics.clean.excess, 8);
+});
+
+test("clean scoring: off on request and for Ollama; unit helpers", async () => {
+  const lab = mockLab();
+  const r = await runTrial(lab, validateInput({ ...base, cleanScore: false, sampling: { temperature: 0 } }));
+  assert.equal(r.metrics.clean, null);
+  assert.equal(validateInput({ backend: "ollama", modelId: "ollama:q", techniqueId: "hallucinogen", prompt: "x" }).cleanScore, false);
+  assert.equal(gbnfLiteral('a"b\\c\nd\te\u0001Ã¼'), '"a\\"b\\\\c\\nd\\te\\x01Ã¼"');
+  assert.equal(scorableText("ok\uFFFDbad"), "ok");
+  const s = scoreTokens([{ token: "He", logprob: -1 }, { token: "llo", logprob: -3 }, { token: "<eos>", logprob: -9 }], "Hello");
+  assert.deepEqual(s, { tokens: 2, surprisal: 2, perChar: 0.8, max: 3, coverage: 1 });
+  assert.equal(scoreTokens(null, "x"), null);
 });
 
 test("runTrial: no noise floor at temperature 0; fixation ids are looked up", async () => {
@@ -131,6 +171,46 @@ test("runTrial: no noise floor at temperature 0; fixation ids are looked up", as
   assert.equal(lab.calls.length, 2);
   assert.equal(r.arms.noise, null);
   assert.equal(lab.calls[1].env.LLM_INJ_FIXATION_IDS, "101,202");
+});
+
+test("runTrial: co-administration and dose schedule reach the engine env", async () => {
+  const lab = mockLab();
+  const r = await runTrial(lab, validateInput({
+    ...base, techniqueId: "hallucinogen", doseMg: 300, coTechniqueId: "paranoia", coDoseMg: 200,
+    schedule: { onset: 16, halfLife: 64 }, sampling: { temperature: 0 }
+  }));
+  const env = lab.calls[1].env;
+  assert.ok(env.LLM_INJ_RESID_NOISE && env.LLM_INJ_FIXATION_BIAS);
+  assert.equal(env.LLM_INJ_FIXATION_IDS, "101,202", "co-technique fixation uses its theme");
+  assert.equal(env.LLM_INJ_PK_ONSET, "16");
+  assert.equal(env.LLM_INJ_PK_HALFLIFE, "64");
+  assert.equal(r.input.coTechniqueId, "paranoia");
+  assert.deepEqual(r.treatment.schedule, { onset: 16, halfLife: 64 });
+  assert.ok(r.treatment.coIntensity > 0);
+  assert.deepEqual(r.input.theme, ["watching", "danger", "threat", "suspicious", "conspiracy", "spy", "trap", "warning"]);
+});
+
+test("steering: a missing control vector is a validation error; an existing one becomes a file path", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "llm-inj-steer-"));
+  try {
+    const input = validateInput({ ...base, techniqueId: "euphoria", doseMg: 200, sampling: { temperature: 0 } });
+    await assert.rejects(runTrial(mockLab({ steeringDir: dir }), input), (e) => e instanceof ValidationError && /npm run vectors/.test(e.message));
+    const file = vectorFile({ steeringDir: dir }, GGUF, "mood");
+    assert.equal(file, path.join(dir, "0123456789abcdef", "mood.gguf"));
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, "GGUF");
+    assert.deepEqual(await listVectors({ steeringDir: dir }, GGUF), ["mood"]);
+    const lab = mockLab({ steeringDir: dir });
+    await runTrial(lab, input);
+    const env = lab.calls[1].env;
+    assert.equal(env.LLM_INJ_STEER_FILE, file);
+    assert.equal(env.LLM_INJ_STEER_VEC, undefined);
+    assert.ok(Number(env.LLM_INJ_STEER_SCALE) > 0);
+    assert.throws(() => vectorFile({ steeringDir: dir }, GGUF, "../evil"), /Bad vector name/);
+    assert.throws(() => vectorFile({ steeringDir: dir }, "gguf:../../x", "mood"), /Bad model id/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("runTrial: Ollama baseline uses placebo options, treated arm changes sampling", async () => {

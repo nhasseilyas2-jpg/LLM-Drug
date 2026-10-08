@@ -5,16 +5,20 @@ import {
   TECHNIQUES,
   TECHNIQUE_IDS,
   buildLlamaEnv,
+  buildLlamaRegimen,
   buildOllamaOptions,
   describeTechnique,
   getTechnique,
   hill,
   intensity,
+  mergeLlamaEnv,
   needsFixation,
   normalizeDose,
+  normalizeSchedule,
   parseDoseList,
   parseTheme,
-  resolveTechniqueId
+  resolveTechniqueId,
+  scheduleFactor
 } from "../src/catalog.js";
 
 const ENGINE_RANGES = {
@@ -27,8 +31,78 @@ const ENGINE_RANGES = {
   LLM_INJ_RESID_NOISE: [0, 10],
   LLM_INJ_LAYER_GAIN: [-4, 4],
   LLM_INJ_FFN_DROPOUT: [0, 0.95],
-  LLM_INJ_KV_FORGET: [0, 1]
+  LLM_INJ_KV_FORGET: [0, 1],
+  LLM_INJ_HEAD_LESION: [0, 1],
+  LLM_INJ_HEAD_GAIN: [-4, 4],
+  LLM_INJ_FFN_LESION: [0, 1],
+  LLM_INJ_PK_ONSET: [0, 100000],
+  LLM_INJ_PK_HALFLIFE: [0, 100000],
+  LLM_INJ_STEER_SCALE: [-10, 10]
 };
+
+test("combinations merge knobs by type and stay inside engine ranges", () => {
+  const m = mergeLlamaEnv(
+    { LLM_INJ_ATTN_SCALE: 0.5, LLM_INJ_LOGIT_NOISE: 0.2, LLM_INJ_FFN_DROPOUT: 0.5, LLM_INJ_GAIN_LAYERS: "0.5:1", LLM_INJ_LAYER_GAIN: 0.8 },
+    { LLM_INJ_ATTN_SCALE: 2, LLM_INJ_LOGIT_NOISE: 0.3, LLM_INJ_FFN_DROPOUT: 0.5, LLM_INJ_GAIN_LAYERS: "0.35:0.65", LLM_INJ_LAYER_GAIN: 0.5, LLM_INJ_KV_FORGET: 0.4 }
+  );
+  assert.equal(m.LLM_INJ_ATTN_SCALE, 1);
+  assert.ok(Math.abs(m.LLM_INJ_LOGIT_NOISE - 0.5) < 1e-12);
+  assert.equal(m.LLM_INJ_FFN_DROPOUT, 0.75);
+  assert.equal(m.LLM_INJ_LAYER_GAIN, 0.4);
+  assert.equal(m.LLM_INJ_GAIN_LAYERS, "0.35:1");
+  assert.equal(m.LLM_INJ_KV_FORGET, 0.4);
+  // a range on only one side is widened to all layers
+  const w = mergeLlamaEnv({ LLM_INJ_FFN_DROPOUT: 0.2 }, { LLM_INJ_FFN_LESION: 0.4, LLM_INJ_FFN_LAYERS: "0.4:0.6" });
+  assert.equal(w.LLM_INJ_FFN_LAYERS, undefined);
+  assert.equal(mergeLlamaEnv({ LLM_INJ_HEAD_GAIN: 0 }, { LLM_INJ_HEAD_GAIN: 2 }).LLM_INJ_HEAD_GAIN, 0);
+
+  for (const a of TECHNIQUE_IDS) {
+    for (const b of TECHNIQUE_IDS) {
+      const { env } = buildLlamaRegimen({ techniqueId: a, doseMg: 500, coTechniqueId: b, coDoseMg: 500, fixationIds: [1] });
+      for (const [key, [lo, hi]] of Object.entries(ENGINE_RANGES)) {
+        if (key in env) assert.ok(Number(env[key]) >= lo && Number(env[key]) <= hi, `${a}+${b}: ${key}=${env[key]}`);
+      }
+      for (const v of Object.values(env)) assert.equal(typeof v, "string");
+    }
+  }
+  const solo = buildLlamaRegimen({ techniqueId: "amnesia", doseMg: 200 });
+  assert.deepEqual(solo.env, buildLlamaEnv("amnesia", 200).env);
+  const placebo = buildLlamaRegimen({ techniqueId: "placebo", doseMg: 300, coTechniqueId: "placebo", coDoseMg: 300, schedule: { onset: 10 } });
+  assert.deepEqual(placebo.env, { LLM_INJ_SEED: "0" });
+});
+
+test("steering: euphoria and dysphoria are opposite poles of one vector and merge by adding", () => {
+  const up = buildLlamaEnv("euphoria", 200).env;
+  const down = buildLlamaEnv("dysphoria", 200).env;
+  assert.equal(up.LLM_INJ_STEER_VEC, "mood");
+  assert.equal(Number(up.LLM_INJ_STEER_SCALE), -Number(down.LLM_INJ_STEER_SCALE));
+  assert.ok(Number(up.LLM_INJ_STEER_SCALE) > 0);
+  assert.equal(describeTechnique("euphoria").requires.steering, "mood");
+  assert.equal(describeTechnique("delirium").requires, null);
+  // same vector: scales add (they cancel at equal doses)
+  const both = buildLlamaRegimen({ techniqueId: "euphoria", doseMg: 200, coTechniqueId: "dysphoria", coDoseMg: 200 }).env;
+  assert.equal(Number(both.LLM_INJ_STEER_SCALE), 0);
+  // different vectors: the primary technique's vector wins, the co-technique's steering is dropped
+  const m = mergeLlamaEnv({ LLM_INJ_STEER_VEC: "mood", LLM_INJ_STEER_SCALE: 1, LLM_INJ_STEER_LAYERS: "0.2:0.8" },
+    { LLM_INJ_STEER_VEC: "other", LLM_INJ_STEER_SCALE: 3, LLM_INJ_STEER_LAYERS: "0:1", LLM_INJ_LOGIT_NOISE: 1 });
+  assert.deepEqual(m, { LLM_INJ_STEER_VEC: "mood", LLM_INJ_STEER_SCALE: 1, LLM_INJ_STEER_LAYERS: "0.2:0.8", LLM_INJ_LOGIT_NOISE: 1 });
+  assert.equal(buildOllamaOptions("euphoria", 200, DEFAULT_SAMPLING), null);
+});
+
+test("dose schedules: normalized, encoded for the engine, same curve as the engine", () => {
+  assert.equal(normalizeSchedule(null), null);
+  assert.equal(normalizeSchedule({ onset: 0, halfLife: 0 }), null);
+  assert.deepEqual(normalizeSchedule({ onset: "12.4", halfLife: -3 }), { onset: 12, halfLife: 0 });
+  assert.deepEqual(normalizeSchedule({ onset: 1e9 }), { onset: 100000, halfLife: 0 });
+  const r = buildLlamaRegimen({ techniqueId: "delirium", doseMg: 200, schedule: { onset: 20, halfLife: 50 } });
+  assert.equal(r.env.LLM_INJ_PK_ONSET, "20");
+  assert.equal(r.env.LLM_INJ_PK_HALFLIFE, "50");
+  const s = { onset: 20, halfLife: 50 };
+  assert.equal(scheduleFactor(s, 0), 0);
+  assert.ok(Math.abs(scheduleFactor(s, 20) - 0.95) < 1e-9);
+  assert.ok(Math.abs(scheduleFactor(s, 70) / scheduleFactor(s, 20) - 0.5 * (1 - Math.exp(-Math.log(20) * 3.5)) / 0.95) < 1e-9);
+  assert.equal(scheduleFactor(null, 5), 1);
+});
 
 test("Hill curve: zero at 0 mg, half at EC50, monotonic, below 1", () => {
   const curve = { ec50: 150, n: 2 };
@@ -96,7 +170,8 @@ test("perturbation strength grows with dose", () => {
     const { env } = buildLlamaEnv(id, dose);
     return Math.abs(Number(env.LLM_INJ_RESID_NOISE || 0)) + Math.abs(Number(env.LLM_INJ_LOGIT_NOISE || 0)) +
       Math.abs(1 - Number(env.LLM_INJ_ATTN_SCALE || 1)) + Math.abs(1 - Number(env.LLM_INJ_LAYER_GAIN || 1)) +
-      Number(env.LLM_INJ_FFN_DROPOUT || 0) + Number(env.LLM_INJ_KV_FORGET || 0) + Math.abs(Number(env.LLM_INJ_FIXATION_BIAS || 0));
+      Number(env.LLM_INJ_FFN_DROPOUT || 0) + Number(env.LLM_INJ_KV_FORGET || 0) + Math.abs(Number(env.LLM_INJ_FIXATION_BIAS || 0)) +
+      Number(env.LLM_INJ_HEAD_LESION || 0) + Number(env.LLM_INJ_FFN_LESION || 0) + Math.abs(Number(env.LLM_INJ_STEER_SCALE || 0));
   };
   for (const id of TECHNIQUE_IDS.filter((x) => x !== "placebo")) {
     assert.ok(strength(id, 50) < strength(id, 200) && strength(id, 200) < strength(id, 500), id);

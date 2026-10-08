@@ -5,10 +5,12 @@
 
 #include "llama.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 #include <vector>
 
 static int g_failed = 0;
@@ -281,6 +283,205 @@ static void test_kv_forget() {
     CHECK(consistent);
 }
 
+static void test_text_and_heads() {
+    // text config: '#' comments, blank lines, CRLF, unknown keys; environment as fallback
+    set_env("LLM_INJ_SEED", "77");
+    set_env("LLM_INJ_LOGIT_NOISE", "9");
+    const std::string text = "# comment\r\nLLM_INJ_LOGIT_NOISE = 0.25\r\n\r\nLLM_INJ_HEAD_IDS=3:1, 0:2;3:1 7\nLLM_INJ_NOISE_MODE=hash\nFOO=bar\n";
+    llm_inj_config c = llm_inj_parse_text(text, [](const char * k) -> const char * { return std::getenv(k); });
+    CHECK(c.logit_noise == 0.25f);   // file overrides the environment
+    CHECK(c.seed == 77ULL);          // environment fallback
+    CHECK(c.noise_mode == LLM_INJ_NOISE_HASH);
+    CHECK(c.head_ids.size() == 2 && c.head_ids[0] == std::make_pair(0, 2) && c.head_ids[1] == std::make_pair(3, 1));
+    CHECK(c.heads_active() && c.graph_active());
+    llm_inj_config d = llm_inj_parse_text(text, nullptr);
+    CHECK(d.seed == 0ULL);
+    set_env("LLM_INJ_SEED", nullptr);
+    set_env("LLM_INJ_LOGIT_NOISE", nullptr);
+
+    CHECK(llm_inj_parse_heads(nullptr).empty());
+    CHECK(llm_inj_parse_heads("5 6 7").empty());
+    CHECK(llm_inj_parse_heads("1:x,2:3").size() == 1);
+}
+
+static void test_pk() {
+    llm_inj_config c;
+    CHECK(!c.pk_active());
+    CHECK(llm_inj_pk_factor(c, 0) == 1.0f && llm_inj_pk_factor(c, 1e6) == 1.0f);
+
+    c.pk_onset = 20.0f;
+    CHECK(c.pk_active());
+    CHECK(llm_inj_pk_factor(c, 0) == 0.0f);
+    CHECK(std::fabs(llm_inj_pk_factor(c, 20) - 0.95f) < 1e-4f);
+    CHECK(llm_inj_pk_factor(c, 5) < llm_inj_pk_factor(c, 10));
+    CHECK(llm_inj_pk_factor(c, 1000) > 0.999f);
+
+    c.pk_halflife = 50.0f;
+    CHECK(std::fabs(llm_inj_pk_factor(c, 70) - 0.5 * (1.0 - std::exp(-std::log(20.0) * 3.5))) < 1e-5);
+    CHECK(std::fabs(llm_inj_pk_factor(c, 120) - 0.25 * (1.0 - std::exp(-std::log(20.0) * 6.0))) < 1e-5);
+    // pure elimination (no onset): halves every half-life
+    llm_inj_config e;
+    e.pk_halflife = 10.0f;
+    CHECK(llm_inj_pk_factor(e, 0) == 1.0f);
+    CHECK(std::fabs(llm_inj_pk_factor(e, 10) - 0.5f) < 1e-6f);
+    CHECK(std::fabs(llm_inj_pk_factor(e, 30) - 0.125f) < 1e-6f);
+
+    // scaling: additive knobs times m, multiplicative knobs interpolate towards 1
+    llm_inj_config s;
+    s.logit_noise = 2.0f; s.logit_temp = 3.0f; s.attn_scale = 0.2f; s.layer_gain = -1.0f; s.head_gain = 0.0f;
+    s.kv_forget = 0.8f; s.ffn_lesion = 0.5f;
+    const llm_inj_config h = llm_inj_scaled(s, 0.5f);
+    CHECK(h.logit_noise == 1.0f && h.logit_temp == 2.0f && std::fabs(h.attn_scale - 0.6f) < 1e-6f);
+    CHECK(h.layer_gain == 0.0f && h.head_gain == 0.5f && std::fabs(h.kv_forget - 0.4f) < 1e-6f && h.ffn_lesion == 0.25f);
+    const llm_inj_config z = llm_inj_scaled(s, 0.0f);
+    CHECK(!z.logits_active() && z.attn_scale == 1.0f && z.layer_gain == 1.0f && z.kv_forget == 0.0f);
+}
+
+static void test_steer() {
+    llm_inj_config c = llm_inj_parse_text("LLM_INJ_STEER_FILE=/tmp/mood.gguf\nLLM_INJ_STEER_SCALE=0.4\nLLM_INJ_STEER_LAYERS=0.25:0.75\n", nullptr);
+    CHECK(c.steer_file == "/tmp/mood.gguf" && c.steer_scale == 0.4f && c.steer_active() && c.graph_active());
+    CHECK(c.steer_layers.lo == 0.25f && c.steer_layers.hi == 0.75f);
+    CHECK(llm_inj_describe(c).find("steer{scale=0.4 file=mood.gguf") != std::string::npos);
+    CHECK(llm_inj_scaled(c, 0.5f).steer_scale == 0.2f);
+    CHECK(llm_inj_site_name(LLM_INJ_SITE_STEER) == std::string("steer"));
+
+    // a scale without a file (or a file without a scale) does nothing
+    CHECK(!llm_inj_parse_text("LLM_INJ_STEER_SCALE=1\n", nullptr).steer_active());
+    CHECK(!llm_inj_parse_text("LLM_INJ_STEER_FILE=x.gguf\n", nullptr).steer_active());
+    // negative scales are allowed (the opposite pole), the range is clamped
+    CHECK(llm_inj_parse_text("LLM_INJ_STEER_FILE=x.gguf\nLLM_INJ_STEER_SCALE=-0.3\n", nullptr).steer_scale == -0.3f);
+    CHECK(llm_inj_parse_text("LLM_INJ_STEER_FILE=x.gguf\nLLM_INJ_STEER_SCALE=99\n", nullptr).steer_scale == 10.0f);
+}
+
+static void test_head_lesion() {
+    llm_inj_config c;
+    c.head_lesion = 0.25f; c.seed = 11;
+    const int n_head = 32, n_layer = 24;
+    int k = 0;
+    for (int h = 0; h < n_head; ++h) k += llm_inj_head_gain(c, 1.0f, 5, n_layer, h, n_head) == 0.0f ? 1 : 0;
+    CHECK(k == 8);
+    // nested in the dose: every head lesioned at m = 0.5 is also lesioned at m = 1
+    bool nested = true;
+    int k_half = 0;
+    for (int h = 0; h < n_head; ++h) {
+        const bool half = llm_inj_head_gain(c, 0.5f, 5, n_layer, h, n_head) != 1.0f;
+        k_half += half ? 1 : 0;
+        nested &= !half || llm_inj_head_gain(c, 1.0f, 5, n_layer, h, n_head) != 1.0f;
+    }
+    CHECK(nested && k_half == 4);
+    // different layers pick different heads
+    bool differs = false;
+    for (int h = 0; h < n_head; ++h) differs |= (llm_inj_head_gain(c, 1.0f, 5, n_layer, h, n_head) != llm_inj_head_gain(c, 1.0f, 6, n_layer, h, n_head));
+    CHECK(differs);
+    CHECK(llm_inj_head_gain(c, 0.0f, 5, n_layer, 0, n_head) == 1.0f);
+    // partial gain is interpolated by the dose factor
+    c.head_gain = 3.0f;
+    float g = 1.0f;
+    for (int h = 0; h < n_head; ++h) g = std::max(g, llm_inj_head_gain(c, 0.5f, 5, n_layer, h, n_head));
+    CHECK(g == 2.0f);
+    // explicit heads and layer ranges
+    llm_inj_config e;
+    e.head_ids = { {2, 3} };
+    CHECK(e.heads_active());
+    CHECK(llm_inj_head_gain(e, 1.0f, 2, n_layer, 3, n_head) == 0.0f);
+    CHECK(llm_inj_head_gain(e, 1.0f, 2, n_layer, 4, n_head) == 1.0f);
+    CHECK(llm_inj_head_gain(e, 1.0f, 3, n_layer, 3, n_head) == 1.0f);
+    llm_inj_parse_range("L10:L12", e.head_layers);
+    CHECK(llm_inj_head_gain(e, 1.0f, 2, n_layer, 3, n_head) == 1.0f);
+}
+
+static void test_ffn_lesion_and_hash_noise() {
+    llm_inj_config c;
+    c.ffn_lesion = 0.3f; c.seed = 5;
+    int n = 0, n_half = 0;
+    bool nested = true;
+    for (int64_t ch = 0; ch < 20000; ++ch) {
+        const bool full = llm_inj_ffn_lesioned(c, 1.0f, 4, ch);
+        const bool half = llm_inj_ffn_lesioned(c, 0.5f, 4, ch);
+        n += full; n_half += half;
+        nested &= !half || full;
+    }
+    CHECK(n > 5700 && n < 6300);
+    CHECK(n_half > 2700 && n_half < 3300);
+    CHECK(nested);
+    CHECK(llm_inj_ffn_lesioned(c, 1.0f, 4, 123) == llm_inj_ffn_lesioned(c, 1.0f, 4, 123));
+    CHECK(!llm_inj_ffn_lesioned(c, 0.0f, 4, 123));
+
+    // hash noise: standard normal, independent of the activation value
+    double s = 0, s2 = 0, sx = 0;
+    const int N = 100000;
+    for (int i = 0; i < N; ++i) {
+        const float x = (float) (i % 1000) * 0.01f;
+        const double z = llm_inj_hash_noise(9, 3, 1, i % 64, x);
+        s += z; s2 += z * z; sx += z * x;
+    }
+    const double m = s / N;
+    CHECK(std::fabs(m) < 0.02);
+    CHECK(std::fabs(s2 / N - m * m - 1.0) < 0.03);
+    CHECK(std::fabs(sx / N - m * 4.995) < 0.1); // ~uncorrelated with x
+    CHECK(llm_inj_hash_noise(9, 3, 1, 2, 0.5f) == llm_inj_hash_noise(9, 3, 1, 2, 0.5f));
+    CHECK(llm_inj_hash_noise(9, 3, 1, 2, 0.5f) != llm_inj_hash_noise(9, 4, 1, 2, 0.5f));
+}
+
+static void test_kv_overload() {
+    llm_inj_config c;
+    c.kv_forget = 1.0f; c.seed = 3;
+    CHECK(!llm_inj_kv_forget_pos(c, 0.0f, 100, 1000));
+    int a = 0, b = 0;
+    for (int p0 = 4; p0 < 4004; ++p0) {
+        a += llm_inj_kv_forget_pos(c, 0.25f, p0, 10000) ? 1 : 0;
+        b += llm_inj_kv_forget_pos(c, 0.5f, p0, 10000) ? 1 : 0;
+    }
+    CHECK(a > 900 && a < 1100);
+    CHECK(b > 1900 && b < 2100);
+}
+
+static void test_reload() {
+    const std::string path = "llm-inj-test-config.txt";
+    auto write = [&](const char * s) {
+        FILE * f = std::fopen(path.c_str(), "wb");
+        std::fputs(s, f);
+        std::fclose(f);
+    };
+    write("LLM_INJ_LOGIT_NOISE=0.5\n");
+    set_env("LLM_INJ_CONFIG_FILE", path.c_str());
+    llm_inj_begin_sequence();
+    const uint64_t g0 = llm_inj_generation();
+    CHECK(llm_inj_cfg().logit_noise == 0.5f);
+    CHECK(!llm_inj_graph_reusable());         // no graph built for this generation yet
+
+    llm_inj_begin_sequence();                 // unchanged file -> same generation
+    CHECK(llm_inj_generation() == g0);
+    CHECK(llm_inj_step() == 0);
+
+    const llm_inj_config & before = llm_inj_cfg();
+    write("LLM_INJ_ATTN_SCALE=2\nLLM_INJ_PK_ONSET=10\n");
+    llm_inj_begin_sequence();
+    CHECK(llm_inj_generation() == g0 + 1);
+    CHECK(llm_inj_cfg().logit_noise == 0.0f && llm_inj_cfg().attn_scale == 2.0f);
+    CHECK(before.logit_noise == 0.5f);        // older references stay valid
+    CHECK(llm_inj_pk_now() == 0.0f);          // prompt is processed at t = 0
+
+    // graph reuse: invalid after a config change, and every token while a dose schedule is active
+    llm_inj_graph_built();
+    CHECK(llm_inj_graph_reusable());
+    auto v = make_vocab(100);
+    auto a = as_array(v);
+    llm_inj_on_sample(&a, 1, 0);
+    CHECK(llm_inj_step() == 1);
+    CHECK(!llm_inj_graph_reusable());
+    CHECK(llm_inj_pk_now() > 0.0f);
+    llm_inj_graph_built();
+    CHECK(llm_inj_graph_reusable());
+
+    std::remove(path.c_str());                // missing file = nothing beyond the environment
+    llm_inj_begin_sequence();
+    CHECK(llm_inj_generation() == g0 + 2);
+    CHECK(!llm_inj_cfg().any_active());
+    CHECK(!llm_inj_graph_reusable());
+    set_env("LLM_INJ_CONFIG_FILE", nullptr);
+}
+
 int main() {
     test_ranges();
     test_env_parsing();
@@ -291,6 +492,13 @@ int main() {
     test_logits_top_suppress_and_temp();
     test_logits_fixation();
     test_kv_forget();
+    test_text_and_heads();
+    test_pk();
+    test_steer();
+    test_head_lesion();
+    test_ffn_lesion_and_hash_noise();
+    test_kv_overload();
+    test_reload();
     std::printf("llm-injection unit tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

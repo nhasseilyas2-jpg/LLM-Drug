@@ -82,6 +82,15 @@ function selectTechnique(id) {
   $("theme").value = (t.theme || []).join(", ");
   $("themeWrap").classList.toggle("hidden", !t.theme);
   renderTechniques();
+  renderRegimen();
+}
+
+function steeringWarning(d) {
+  const name = d.requires?.steering;
+  if (!name || $("backend").value !== "llamacpp") return "";
+  const model = state.models?.gguf.find((m) => m.id === $("model").value);
+  if (!model || (model.steering || []).includes(name)) return "";
+  return `<p class="warn">This technique needs a '${esc(name)}' control vector for this model. Generate it once: <code>npm run vectors -- --model "${esc(model.name)}" --vector ${esc(name)}</code>, then refresh the models.</p>`;
 }
 
 function renderTechniqueInfo() {
@@ -94,7 +103,8 @@ function renderTechniqueInfo() {
     <p class="hint">Analogy: ${esc(d.analogy)}</p>
     <ul>${d.mechanism.map((m) => `<li>${esc(m)}</li>`).join("")}</ul>
     <p class="hint">Sites: ${sites} · Hill EC50 ${d.curve.ec50} mg, n = ${d.curve.n} · E = effect intensity (0–1)</p>
-    ${support === "approximate" ? `<p class="warn">On Ollama this technique is approximated with sampler options only (temperature, top-p/top-k, mirostat, context size). It is not the same mechanism.</p>` : ""}`;
+    ${support === "approximate" ? `<p class="warn">On Ollama this technique is approximated with sampler options only (temperature, top-p/top-k, mirostat, context size). It is not the same mechanism.</p>` : ""}
+    ${steeringWarning(d)}`;
   renderDose();
 }
 
@@ -125,6 +135,42 @@ function setDose(value) {
   renderDose();
 }
 
+function regimenInput() {
+  if ($("backend").value !== "llamacpp") return {};
+  const out = {};
+  if ($("coTechnique").value) {
+    out.coTechniqueId = $("coTechnique").value;
+    out.coDoseMg = Number($("coDose").value);
+  }
+  const onset = Number($("onset").value) || 0;
+  const halfLife = Number($("halfLife").value) || 0;
+  if (onset > 0 || halfLife > 0) out.schedule = { onset, halfLife };
+  return out;
+}
+
+function renderRegimen() {
+  const llama = $("backend").value === "llamacpp";
+  $("regimen").classList.toggle("hidden", !llama);
+  const select = $("coTechnique");
+  const current = select.value;
+  select.innerHTML = `<option value="">None</option>` + TECHNIQUE_IDS.filter((id) => id !== "placebo" && id !== state.technique)
+    .map((id) => `<option value="${id}">${esc(TECHNIQUES[id].name)}</option>`).join("");
+  select.value = TECHNIQUE_IDS.includes(current) && current !== state.technique ? current : "";
+  const co = llama && select.value ? TECHNIQUES[select.value] : null;
+  const primary = TECHNIQUES[state.technique];
+  const themed = primary.theme || co?.theme;
+  if (!primary.theme && co?.theme && !$("theme").value) $("theme").value = co.theme.join(", ");
+  $("themeWrap").classList.toggle("hidden", !themed);
+}
+
+function regimenLabel(record) {
+  const input = record.input || {};
+  const parts = [];
+  if (input.coTechniqueId) parts.push(`+ ${TECHNIQUES[input.coTechniqueId]?.name || input.coTechniqueId} ${input.coDoseMg} mg`);
+  if (input.schedule) parts.push(`onset ${input.schedule.onset} tok, half-life ${input.schedule.halfLife || "∞"} tok`);
+  return parts.join(" · ");
+}
+
 function currentInput() {
   const num = (id) => Number($(id).value);
   return {
@@ -138,7 +184,9 @@ function currentInput() {
     system: $("system").value,
     theme: $("theme").value,
     seed: num("seed"),
+    ...regimenInput(),
     noiseFloor: $("noiseFloor").checked,
+    cleanScore: $("cleanScore").checked,
     judgeModelId: $("judge").value,
     sampling: Object.fromEntries(["temperature", "top_p", "top_k", "min_p", "repeat_penalty", "max_tokens", "num_ctx"].map((k) => [k, num(k)])),
     doses: parseDoseList($("doses").value),
@@ -213,6 +261,12 @@ function metricsTable(m) {
     rows.push(["Top-5 entropy (nats)", fmt(it.entropy), ib ? `baseline ${fmt(ib.entropy)}` : ""]);
     rows.push(["Surprisal of chosen tokens", fmt(it.surprisal), ib ? `baseline ${fmt(ib.surprisal)}` : ""]);
   }
+  const c = m.clean;
+  if (c?.treated && !c.treated.error) {
+    rows.push(["Clean-model surprisal (nats/token)", fmt(c.treated.surprisal), `baseline ${fmt(c.baseline?.surprisal)} → excess ${fmt(c.excess)}${c.noise ? ` · noise ${fmt(c.noise.surprisal)}` : ""}`]);
+  } else if (c?.treated?.error) {
+    rows.push(["Clean-model surprisal", "–", c.treated.error]);
+  }
   return `<table class="metrics"><tbody>${rows.map((r) => `<tr><th>${esc(r[0])}</th><td>${esc(r[1])}</td><td class="hint">${esc(r[2])}</td></tr>`).join("")}</tbody></table>`;
 }
 
@@ -248,7 +302,8 @@ function arms(cols) {
 function header(record) {
   const t = TECHNIQUES[record.techniqueId];
   const dose = record.doseMg !== undefined && record.doseMg !== null ? ` · ${record.doseMg} mg` : "";
-  return `<p class="record-head"><strong>${esc(t ? t.name : record.techniqueId)}</strong>${esc(dose)} · ${esc(record.backend)} · ${esc(record.model)} · <span class="hint">${esc(new Date(record.timestamp).toLocaleString())}</span>${record.legacy ? ` <span class="tag warn">legacy record</span>` : ""}</p>`;
+  const regimen = regimenLabel(record);
+  return `<p class="record-head"><strong>${esc(t ? t.name : record.techniqueId)}</strong>${esc(dose)}${regimen ? ` <span class="tag">${esc(regimen)}</span>` : ""} · ${esc(record.backend)} · ${esc(record.model)} · <span class="hint">${esc(new Date(record.timestamp).toLocaleString())}</span>${record.legacy ? ` <span class="tag warn">legacy record</span>` : ""}</p>`;
 }
 
 function renderRun(r) {
@@ -282,8 +337,8 @@ function doseChart(summary) {
 }
 
 function renderSweep(r) {
-  const table = `<table class="metrics"><thead><tr><th>Dose</th><th>n</th><th>Impairment</th><th>Excess divergence</th><th>Garble</th><th>Repetition</th><th>Anchor kept</th><th>Entropy</th></tr></thead><tbody>
-    ${r.summary.map((s) => `<tr><th>${s.doseMg} mg</th><td>${s.n}</td><td>${ci(s.impairment, 1)}</td><td>${ci(s.excessDivergence)}</td><td>${ci(s.garble)}</td><td>${ci(s.repetition)}</td><td>${ci(s.anchorTreated)}</td><td>${ci(s.entropy)}</td></tr>`).join("")}
+  const table = `<table class="metrics"><thead><tr><th>Dose</th><th>n</th><th>Impairment</th><th>Excess divergence</th><th>Garble</th><th>Repetition</th><th>Anchor kept</th><th>Entropy</th><th>Clean surprisal</th></tr></thead><tbody>
+    ${r.summary.map((s) => `<tr><th>${s.doseMg} mg</th><td>${s.n}</td><td>${ci(s.impairment, 1)}</td><td>${ci(s.excessDivergence)}</td><td>${ci(s.garble)}</td><td>${ci(s.repetition)}</td><td>${ci(s.anchorTreated)}</td><td>${ci(s.entropy)}</td><td>${ci(s.cleanSurprisal)}</td></tr>`).join("")}
   </tbody></table>`;
   const samples = r.rows.filter((row) => row.trial === 0).map((row) => [`${row.doseMg} mg (E = ${fmt(row.intensity, 2)})`, row.treated.content, `trial 1 · impairment ${fmt(row.metrics.impairment, 1)}`]);
   return header(r) + doseChart(r.summary) + table +
@@ -292,7 +347,7 @@ function renderSweep(r) {
 }
 
 function renderAgent(r) {
-  return header(r) + r.steps.map((s) => `<h3>Step ${s.step} <span class="hint">divergence ${fmt(s.metrics.divergence)} · impairment ${fmt(s.metrics.impairment, 1)}</span></h3>` +
+  return header(r) + r.steps.map((s) => `<h3>Step ${s.step} <span class="hint">divergence ${fmt(s.metrics.divergence)} · impairment ${fmt(s.metrics.impairment, 1)}${s.metrics.clean?.treated?.surprisal !== undefined ? ` · clean surprisal ${fmt(s.metrics.clean.treated.surprisal)} (baseline ${fmt(s.metrics.clean.baseline?.surprisal)})` : ""}</span></h3>` +
     arms([["Baseline trajectory", s.baseline.content], ["Treated trajectory", s.treated.content]])).join("") +
     auditBlock(r.treatment, r.steps[r.steps.length - 1]?.treated.engine);
 }
@@ -318,7 +373,7 @@ async function loadHistory() {
     const { items } = await api("/api/history?limit=60");
     $("history").innerHTML = items.length
       ? items.map((item, i) => `<button type="button" class="history-item" data-index="${i}">
-          <span>${esc(item.type)}</span><strong>${esc(TECHNIQUES[item.techniqueId]?.name || item.techniqueId || "–")}</strong>
+          <span>${esc(item.type)}</span><strong>${esc(TECHNIQUES[item.techniqueId]?.name || item.techniqueId || "–")}${item.input?.coTechniqueId ? ` + ${esc(TECHNIQUES[item.input.coTechniqueId]?.name || item.input.coTechniqueId)}` : ""}</strong>
           <span>${item.doseMg !== undefined && item.doseMg !== null ? `${item.doseMg} mg` : item.input?.doses ? `${item.input.doses.join("/")} mg` : ""}</span>
           <span class="hint">${esc(item.model)}</span><span class="hint">${esc(new Date(item.timestamp).toLocaleString())}</span>${item.legacy ? `<span class="tag warn">legacy</span>` : ""}</button>`).join("")
       : `<p class="empty">No runs yet.</p>`;
@@ -338,9 +393,11 @@ function download(name, text, type) {
 }
 
 export function recordToCsv(r) {
-  const head = ["id", "type", "technique", "backend", "model", "dose_mg", "trial", "seed", "intensity", "impairment", "divergence", "noise_floor", "excess_divergence", "garble", "repetition", "script_switch", "anchor", "entropy", "surprisal", "words"];
-  const line = (dose, trial, seed, intensity, m) => [r.id, r.type, r.techniqueId, r.backend, JSON.stringify(r.model), dose, trial, seed, intensity, m.impairment, m.divergence, m.noiseFloor ?? "", m.excessDivergence,
-    m.treated.garble, m.treated.repetition, m.treated.scriptSwitch, m.anchor ? m.anchor.treated : "", m.internal?.treated?.entropy ?? "", m.internal?.treated?.surprisal ?? "", m.treated.words].join(",");
+  const head = ["id", "type", "technique", "backend", "model", "dose_mg", "co_technique", "co_dose_mg", "onset_tokens", "half_life_tokens", "trial", "seed", "intensity", "impairment", "divergence", "noise_floor", "excess_divergence", "garble", "repetition", "script_switch", "anchor", "entropy", "surprisal", "clean_surprisal", "clean_surprisal_baseline", "words"];
+  const inp = r.input || {};
+  const regimen = [inp.coTechniqueId || "", inp.coDoseMg ?? "", inp.schedule?.onset ?? "", inp.schedule?.halfLife ?? ""];
+  const line = (dose, trial, seed, intensity, m) => [r.id, r.type, r.techniqueId, r.backend, JSON.stringify(r.model), dose, ...regimen, trial, seed, intensity, m.impairment, m.divergence, m.noiseFloor ?? "", m.excessDivergence,
+    m.treated.garble, m.treated.repetition, m.treated.scriptSwitch, m.anchor ? m.anchor.treated : "", m.internal?.treated?.entropy ?? "", m.internal?.treated?.surprisal ?? "", m.clean?.treated?.surprisal ?? "", m.clean?.baseline?.surprisal ?? "", m.treated.words].join(",");
   const rows = r.type === "run" ? [line(r.doseMg, 0, r.arms.treated.seed, r.intensity, r.metrics)]
     : r.type === "dose-response" ? r.rows.map((row) => line(row.doseMg, row.trial, row.seed, row.intensity, row.metrics))
     : r.steps.map((s) => line(r.doseMg, s.step, s.treated.seed, r.intensity, s.metrics));
@@ -350,7 +407,9 @@ export function recordToCsv(r) {
 // ---------------------------------------------------------------- wiring
 
 function bind() {
-  $("backend").addEventListener("change", renderModels);
+  $("backend").addEventListener("change", () => { renderModels(); renderRegimen(); });
+  $("model").addEventListener("change", renderTechniqueInfo);
+  $("coTechnique").addEventListener("change", renderRegimen);
   $("refreshModels").addEventListener("click", loadModels);
   $("techniques").addEventListener("click", (event) => {
     const button = event.target.closest(".technique");

@@ -3,6 +3,7 @@ import http from "node:http";
 import { after, before, test } from "node:test";
 import path from "node:path";
 import * as metrics from "../src/metrics.js";
+import { TECHNIQUE_IDS } from "../src/catalog.js";
 import { ROOT } from "../lib/config.js";
 import { createApp } from "../lib/server.js";
 
@@ -103,7 +104,7 @@ test("write endpoints require JSON, a size limit and valid input", async () => {
 
 test("catalog, status and history routes", async () => {
   const cat = await request("/api/catalog");
-  assert.equal(cat.json.techniques.length, 10);
+  assert.equal(cat.json.techniques.length, TECHNIQUE_IDS.length);
   assert.ok(cat.json.defaults.sampling);
   const status = await request("/api/status");
   assert.equal(status.json.llamaServer.available, false);

@@ -11,8 +11,38 @@ index afdaddc79..944188bf4 100644
      unicode-data.cpp
      unicode.cpp
  )
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index da9c558d2..03a2beb00 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -11,6 +11,7 @@
+ #include "llama-model.h"
+ #include "llama-ext.h"
+ #include "llama-sampler.h"
++#include "llm-injection.h"
+ #include "llama.h"
+ 
+ #include <cinttypes>
+@@ -1402,7 +1403,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
+     const auto gparams = graph_params(res, ubatch, mctx, gtype);
+ 
+-    if (!graph_reuse_disable && gf_res_prev_active == res && res->can_reuse(gparams)) {
++    // llm-injection: graphs bake in the injection config (and, with a dose schedule, the current dose)
++    if (!graph_reuse_disable && llm_inj_graph_reusable() && gf_res_prev_active == res && res->can_reuse(gparams)) {
+         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
+ 
+         // with pipeline parallelism, the previous graph_compute_async may still be running
+@@ -1423,6 +1425,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+         //const auto t_start_us = ggml_time_us();
+ 
+         gf = model.build_graph(gparams);
++        llm_inj_graph_built();
+ 
+         //LLAMA_LOG_INFO("graph build time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+ 
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 07ca49ad0..cf2e04a3f 100644
+index 07ca49ad0..6e0dc7733 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -15,6 +15,7 @@
@@ -72,6 +102,26 @@ index 07ca49ad0..cf2e04a3f 100644
      // split the batch into streams if needed
      const auto n_stream = k->ne[3];
  
+@@ -2649,6 +2669,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+         ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
+         ggml_prec_set_acc(cur, GGML_PREC_F32);
+ 
++        // llm-injection: per-head lesions, cur = [dv, n_head, n_tokens, n_stream] (no-op unless configured)
++        cur = llm_inj_attn_heads(ctx0, cur, 1, il, (int) n_layer);
++
+         if (v_mla) {
+ #if 0
+             // v_mla can be applied as a matrix-vector multiplication with broadcasting across dimension 3 == n_tokens.
+@@ -2715,6 +2738,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+         ggml_tensor * kqv = ggml_mul_mat(ctx0, v, kq);
+         cb(kqv, "kqv", il);
+ 
++        // llm-injection: per-head lesions, kqv = [dv, n_tokens, n_head, n_stream] (no-op unless configured)
++        kqv = llm_inj_attn_heads(ctx0, kqv, 2, il, (int) n_layer);
++
+         // for MLA with the absorption optimization, we need to "decompress" from MQA back to MHA
+         if (v_mla) {
+             kqv = ggml_mul_mat(ctx0, v_mla, kqv);
 diff --git a/src/llama-graph.h b/src/llama-graph.h
 index cc4110639..0bed98c36 100644
 --- a/src/llama-graph.h
@@ -88,7 +138,7 @@ index cc4110639..0bed98c36 100644
      virtual ~llm_graph_context() = default;
  
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 332d1abe0..83ea069a3 100644
+index 332d1abe0..a51b1085c 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -4,6 +4,7 @@
@@ -99,18 +149,19 @@ index 332d1abe0..83ea069a3 100644
  
  #include <algorithm>
  #include <cassert>
-@@ -1571,6 +1572,10 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
+@@ -1571,6 +1572,11 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
      const T mask_keep = llama_cast<T>(0.0f);
      const T mask_drop = llama_cast<T>(-INFINITY);
  
 +    // llm-injection: hide a pseudo-random subset of older cached positions (no-op unless configured)
 +    const llm_inj_config & inj = llm_inj_cfg();
 +    const bool inj_forget = inj.kv_active();
++    const float inj_p     = inj_forget ? inj.kv_forget * llm_inj_pk_now() : 0.0f;
 +
      // the min position in the batch for each sequence
      llama_pos seq_pos_min[LLAMA_MAX_SEQ];
      std::fill(seq_pos_min, seq_pos_min + LLAMA_MAX_SEQ, INT32_MAX);
-@@ -1612,7 +1617,8 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
+@@ -1612,7 +1618,8 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
  
              auto & idxs = seq_idxs[seq_id];
  
@@ -120,11 +171,11 @@ index 332d1abe0..83ea069a3 100644
                  if (seq_srct.find(seq_id) != seq_srct.end()) {
                      const uint32_t srct = seq_srct[seq_id];
  
-@@ -1690,6 +1696,11 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
+@@ -1690,6 +1697,11 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
                      }
                  }
  
-+                if (inj_forget && llm_inj_kv_forget_pos(inj, p0, p1)) {
++                if (inj_forget && llm_inj_kv_forget_pos(inj, inj_p, p0, p1)) {
 +                    llm_inj_mark_fired(LLM_INJ_SITE_KV_FORGET);
 +                    goto skip;
 +                }
@@ -133,7 +184,7 @@ index 332d1abe0..83ea069a3 100644
                      data[idst + j] = llama_cast<T>(static_cast<float>(-std::abs(p0 - p1)));
                  } else {
 diff --git a/src/llama-sampler.cpp b/src/llama-sampler.cpp
-index b797c50be..c3b07bd53 100644
+index b797c50be..3b39eba8b 100644
 --- a/src/llama-sampler.cpp
 +++ b/src/llama-sampler.cpp
 @@ -3,6 +3,7 @@
@@ -149,8 +200,8 @@ index b797c50be..c3b07bd53 100644
      time_meas tm(chain->t_sample_us, chain->params.no_perf);
  
 +    // llm-injection: perturb the candidate logits before any sampler runs (no-op unless LLM_INJ_* is set)
-+    if (llm_inj_cfg().logits_active()) {
-+        llm_inj_apply_logits(cur_p, llama_sampler_get_seed(smpl), chain->inj_step++);
++    if (llm_inj_cfg().any_active()) {
++        llm_inj_on_sample(cur_p, llama_sampler_get_seed(smpl), chain->inj_step++);
 +    }
 +
      bool is_backend = chain->is_init;
@@ -165,17 +216,27 @@ index b797c50be..c3b07bd53 100644
      for (auto & smpl : chain->samplers) {
          llama_sampler_reset(smpl.ptr);
      }
+@@ -868,6 +876,9 @@ static struct llama_sampler_i llama_sampler_chain_i = {
+ };
+ 
+ struct llama_sampler * llama_sampler_chain_init(struct llama_sampler_chain_params params) {
++    // llm-injection: a new sampler chain starts a new sequence (reload per-request config, reset the token clock)
++    llm_inj_begin_sequence();
++
+     return llama_sampler_init(
+         /* .iface = */ &llama_sampler_chain_i,
+         /* .ctx   = */ new llama_sampler_chain {
 diff --git a/src/llama-sampler.h b/src/llama-sampler.h
-index e5db2982b..356275ec0 100644
+index e5db2982b..9c18f6db2 100644
 --- a/src/llama-sampler.h
 +++ b/src/llama-sampler.h
-@@ -28,6 +28,9 @@ struct llama_sampler_chain {
-     // pre-allocated buffer for llama_sampler_sample to avoid repeated allocations
-     std::vector<llama_token_data> cur;
+@@ -33,6 +33,9 @@ struct llama_sampler_chain {
+     mutable int64_t t_sample_us;
  
+     mutable int32_t n_sample;
++
 +    // llm-injection: number of chain applications since init/reset (drives per-token perturbations)
 +    uint64_t inj_step = 0;
-+
-     // timing
+ };
  
-     mutable int64_t t_sample_us;
+ uint32_t llama_sampler_backend_n_nodes(const llama_sampler * sampler);

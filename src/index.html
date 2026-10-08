@@ -48,6 +48,17 @@
       <label id="themeWrap" class="hidden">Theme words (comma separated)
         <input id="theme" type="text" maxlength="600">
       </label>
+      <details id="regimen">
+        <summary>Co-administration and dose schedule (llama.cpp)</summary>
+        <div class="grid3">
+          <label>Second technique <select id="coTechnique"><option value="">None</option></select></label>
+          <label>Second dose (mg) <input id="coDose" type="number" min="0" max="500" step="5" value="100"></label>
+          <span></span>
+          <label>Onset (tokens) <input id="onset" type="number" min="0" max="100000" step="1" value="0"></label>
+          <label>Half-life (tokens, 0 = none) <input id="halfLife" type="number" min="0" max="100000" step="1" value="0"></label>
+        </div>
+        <p class="hint">Knobs from both techniques are combined: scales multiply, noises add, probabilities combine as independent events. With an onset, the effect ramps up over the first tokens of the answer (95% at onset), then decays with the half-life. The prompt itself is read at the strength of token 0.</p>
+      </details>
 
       <h2>4. Task</h2>
       <label>Prompt / agent objective
@@ -72,6 +83,7 @@
           <label>Context (Ollama) <input id="num_ctx" type="number" min="256" max="131072" step="256" value="4096"></label>
           <label>Seed <input id="seed" type="number" min="0" step="1" value="42"></label>
           <label class="check"><input id="noiseFloor" type="checkbox" checked> Noise-floor arm</label>
+          <label class="check" title="Teacher-forces each arm's text through the untreated model (llama.cpp only, one extra pass per arm)"><input id="cleanScore" type="checkbox" checked> Clean-model surprisal</label>
         </div>
         <label>System prompt
           <textarea id="system" rows="2" maxlength="4000"></textarea>

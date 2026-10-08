@@ -164,7 +164,7 @@ export function impairmentScore({ excessDivergence, baseline, treated, anchor })
 }
 
 // Compare the arms of one trial. noise = second untreated sample (different seed) or null.
-export function compareArms({ baseline, treated, noise = null, expected = "", logprobs = {} }) {
+export function compareArms({ baseline, treated, noise = null, expected = "", logprobs = {}, clean = null }) {
   const b = textMetrics(baseline);
   const t = textMetrics(treated);
   const divergence = wordDivergence(baseline, treated);
@@ -185,8 +185,18 @@ export function compareArms({ baseline, treated, noise = null, expected = "", lo
       baseline: logprobStats(logprobs.baseline),
       treated: logprobStats(logprobs.treated)
     },
+    clean: cleanScores(clean),
     impairment: impairmentScore({ excessDivergence, baseline: b, treated: t, anchor })
   };
+}
+
+// Surprisal of each arm's text under the untreated model (teacher-forced), and the treated excess
+// over the baseline. Inputs are scoreTokens() results or null.
+export function cleanScores(clean) {
+  if (!clean || (!clean.baseline && !clean.treated)) return null;
+  const s = (x) => (x && Number.isFinite(x.surprisal) ? x.surprisal : null);
+  const excess = s(clean.treated) !== null && s(clean.baseline) !== null ? round(s(clean.treated) - s(clean.baseline)) : null;
+  return { baseline: clean.baseline ?? null, treated: clean.treated ?? null, noise: clean.noise ?? null, excess };
 }
 
 // --- statistics ---------------------------------------------------------------------------
@@ -234,7 +244,9 @@ export const SUMMARY_FIELDS = {
   scriptSwitch: (m) => m.treated.scriptSwitch,
   anchorTreated: (m) => (m.anchor ? m.anchor.treated : null),
   entropy: (m) => m.internal?.treated?.entropy ?? null,
-  surprisal: (m) => m.internal?.treated?.surprisal ?? null
+  surprisal: (m) => m.internal?.treated?.surprisal ?? null,
+  cleanSurprisal: (m) => m.clean?.treated?.surprisal ?? null,
+  cleanExcess: (m) => m.clean?.excess ?? null
 };
 
 // rows: [{ doseMg, metrics }] -> [{ doseMg, n, <field>: {n, mean, lo, hi} }]

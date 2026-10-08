@@ -20,6 +20,9 @@ export const SITES = {
   residual: { label: "Residual stream", where: "Hidden state at the end of transformer blocks" },
   ffn: { label: "Feed-forward", where: "Output units of dense / MoE feed-forward blocks" },
   kv: { label: "KV memory", where: "Attention mask over cached past tokens" },
+  heads: { label: "Attention heads", where: "Per-head attention outputs (lesion / gain), before the output projection" },
+  lesion: { label: "FFN lesion", where: "A fixed set of feed-forward output channels, silenced for every token" },
+  steer: { label: "Steering vector", where: "A per-layer control vector added to the residual stream of every token (needs npm run vectors)" },
   sampler: { label: "Sampler settings", where: "Ollama sampling options (temperature, top-p, ...)" }
 };
 
@@ -277,6 +280,90 @@ export const TECHNIQUES = {
     ollama: () => null
   },
 
+  neurotoxin: {
+    name: "Neurotoxin",
+    category: "lesion",
+    analogy: "Excitotoxic damage: neurons die and stay dead, scattered across the whole cortex.",
+    summary: "Permanently silences a growing, dose-nested set of attention heads and feed-forward channels in every layer.",
+    mechanism: [
+      "Attention heads: a fraction 0.6·E of heads in every layer ablated (output × 0); the set grows monotonically with dose",
+      "Feed-forward: a fixed fraction 0.3·E of output channels silenced in every layer"
+    ],
+    sites: ["heads", "lesion"],
+    curve: { ec50: 180, n: 2 },
+    ollamaSupport: "none",
+    llamacpp: (e) => ({
+      LLM_INJ_HEAD_LESION: 0.6 * e,
+      LLM_INJ_HEAD_GAIN: 0,
+      LLM_INJ_FFN_LESION: 0.3 * e
+    }),
+    ollama: () => null
+  },
+
+  stroke: {
+    name: "Stroke",
+    category: "lesion",
+    analogy: "A focal infarct: one region is knocked out completely while the rest of the brain is intact.",
+    summary: "A focal lesion: most attention heads and feed-forward channels in a narrow band of middle layers are silenced.",
+    mechanism: [
+      "Attention heads: a fraction 0.9·E of heads ablated in layers at depth 0.4–0.6",
+      "Feed-forward: 0.8·E of output channels silenced in the same band"
+    ],
+    sites: ["heads", "lesion"],
+    curve: { ec50: 150, n: 2.5 },
+    ollamaSupport: "none",
+    llamacpp: (e) => ({
+      LLM_INJ_HEAD_LESION: 0.9 * e,
+      LLM_INJ_HEAD_GAIN: 0,
+      LLM_INJ_HEAD_LAYERS: "0.4:0.6",
+      LLM_INJ_FFN_LESION: 0.8 * e,
+      LLM_INJ_FFN_LAYERS: "0.4:0.6"
+    }),
+    ollama: () => null
+  },
+
+  euphoria: {
+    name: "Euphoria",
+    category: "affect",
+    analogy: "An MDMA-like mood lift: elevated, effusive, over-friendly affect; at high doses manic, incoherent cheer.",
+    summary: "Adds the model's own 'euphoric minus depressed' activation direction (a control vector) to the residual stream.",
+    mechanism: [
+      "Residual stream: + 2.5·E × mood vector in layers at depth 0.2–0.8",
+      "Mood vector: mean hidden-state difference between euphoric and depressed personas (steering/mood.json)"
+    ],
+    sites: ["steer"],
+    curve: { ec50: 150, n: 1.5 },
+    ollamaSupport: "none",
+    requires: { steering: "mood" },
+    llamacpp: (e) => ({
+      LLM_INJ_STEER_VEC: "mood",
+      LLM_INJ_STEER_SCALE: 2.5 * e,
+      LLM_INJ_STEER_LAYERS: "0.2:0.8"
+    }),
+    ollama: () => null
+  },
+
+  dysphoria: {
+    name: "Dysphoria",
+    category: "affect",
+    analogy: "A depressant come-down: flat, hopeless, withdrawn affect; at high doses bleak perseveration.",
+    summary: "Subtracts the 'euphoric minus depressed' activation direction (the euphoria vector, reversed) from the residual stream.",
+    mechanism: [
+      "Residual stream: − 2.5·E × mood vector in layers at depth 0.2–0.8",
+      "Mood vector: mean hidden-state difference between euphoric and depressed personas (steering/mood.json)"
+    ],
+    sites: ["steer"],
+    curve: { ec50: 150, n: 1.5 },
+    ollamaSupport: "none",
+    requires: { steering: "mood" },
+    llamacpp: (e) => ({
+      LLM_INJ_STEER_VEC: "mood",
+      LLM_INJ_STEER_SCALE: -2.5 * e,
+      LLM_INJ_STEER_LAYERS: "0.2:0.8"
+    }),
+    ollama: () => null
+  },
+
   creativity: {
     name: "Creativity",
     category: "divergence",
@@ -363,6 +450,112 @@ export function needsFixation(techniqueId, doseMg) {
   return e > 0 && "LLM_INJ_FIXATION_BIAS" in technique.llamacpp(e);
 }
 
+// --- combinations and dose schedules ------------------------------------------------------------
+//
+// Two techniques can be co-administered. Their engine parameters are merged per key:
+//   multiplicative knobs (attention scale, layer gain, logit temperature) multiply,
+//   additive knobs (noise RMS, tail boost, fixation bias) add,
+//   probabilities / fractions (top suppress, dropout, lesions, KV forgetting) combine as 1 - (1 - a)(1 - b),
+//   counts take the maximum, layer ranges take the smallest relative band covering both.
+// Head gain is not merged: an ablation (gain 0) wins over any other value.
+// Steering: one vector per run. Scales add when both techniques use the same vector (euphoria + dysphoria
+// cancel); otherwise the primary technique's vector and scale win.
+
+const MERGE_MULTIPLY = new Set(["LLM_INJ_ATTN_SCALE", "LLM_INJ_LAYER_GAIN", "LLM_INJ_LOGIT_TEMP"]);
+const MERGE_ADD = new Set(["LLM_INJ_RESID_NOISE", "LLM_INJ_LOGIT_NOISE", "LLM_INJ_TAIL_BOOST", "LLM_INJ_FIXATION_BIAS"]);
+const MERGE_PROB = new Set(["LLM_INJ_TOP_SUPPRESS", "LLM_INJ_FFN_DROPOUT", "LLM_INJ_FFN_LESION", "LLM_INJ_HEAD_LESION", "LLM_INJ_KV_FORGET"]);
+const MERGE_MAX = new Set(["LLM_INJ_TAIL_COUNT", "LLM_INJ_KV_RECENT", "LLM_INJ_KV_SINK"]);
+const RANGE_KEYS = new Set(["LLM_INJ_ATTN_LAYERS", "LLM_INJ_RESID_LAYERS", "LLM_INJ_GAIN_LAYERS", "LLM_INJ_HEAD_LAYERS", "LLM_INJ_FFN_LAYERS", "LLM_INJ_STEER_LAYERS"]);
+
+function parseRelRange(value) {
+  const m = /^\s*([0-9.]+)\s*:\s*([0-9.]+)\s*$/.exec(String(value ?? "0:1"));
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+
+export function mergeLlamaEnv(a, b) {
+  const out = { ...a };
+  const steerConflict = "LLM_INJ_STEER_VEC" in a && "LLM_INJ_STEER_VEC" in b && a.LLM_INJ_STEER_VEC !== b.LLM_INJ_STEER_VEC;
+  for (const [key, value] of Object.entries(b)) {
+    if (steerConflict && /^LLM_INJ_STEER_/.test(key)) continue;
+    if (key === "LLM_INJ_STEER_VEC" && key in out) continue;
+    if (key === "LLM_INJ_STEER_SCALE" && key in out) {
+      out[key] = Number(out[key]) + Number(value);
+      continue;
+    }
+    if (!(key in out)) {
+      out[key] = value;
+      continue;
+    }
+    const x = Number(out[key]);
+    const y = Number(value);
+    if (MERGE_MULTIPLY.has(key)) out[key] = x * y;
+    else if (MERGE_ADD.has(key)) out[key] = x + y;
+    else if (MERGE_PROB.has(key)) out[key] = Math.min(0.95, 1 - (1 - x) * (1 - y));
+    else if (MERGE_MAX.has(key)) out[key] = Math.max(x, y);
+    else if (key === "LLM_INJ_HEAD_GAIN") out[key] = x === 0 || y === 0 ? 0 : x * y;
+    else if (RANGE_KEYS.has(key)) {
+      const r1 = parseRelRange(out[key]);
+      const r2 = parseRelRange(value);
+      out[key] = r1 && r2 ? `${Math.min(r1[0], r2[0])}:${Math.max(r1[1], r2[1])}` : "0:1";
+    } else out[key] = value;
+  }
+  // a layer range only applies to its own technique's knob; when one side had no range (all layers), widen to all
+  for (const key of RANGE_KEYS) {
+    const knob = { LLM_INJ_ATTN_LAYERS: "LLM_INJ_ATTN_SCALE", LLM_INJ_RESID_LAYERS: "LLM_INJ_RESID_NOISE",
+      LLM_INJ_GAIN_LAYERS: "LLM_INJ_LAYER_GAIN", LLM_INJ_HEAD_LAYERS: "LLM_INJ_HEAD_LESION", LLM_INJ_FFN_LAYERS: "LLM_INJ_FFN_DROPOUT",
+      LLM_INJ_STEER_LAYERS: "LLM_INJ_STEER_SCALE" }[key];
+    const sides = [a, b].filter((env) => knob in env || (key === "LLM_INJ_FFN_LAYERS" && "LLM_INJ_FFN_LESION" in env));
+    if (sides.length === 2 && sides.some((env) => !(key in env))) delete out[key];
+  }
+  return out;
+}
+
+export const SCHEDULE_MAX_TOKENS = 100000;
+
+// Pharmacokinetic dose schedule over generated tokens t (engine side):
+//   m(t) = (1 - exp(-ln 20 · t / onset)) · 0.5^(max(0, t - onset) / halfLife)
+// onset = tokens to reach 95 % of the effect (0 = immediate), halfLife = elimination half-life (0 = none).
+export function normalizeSchedule(schedule) {
+  if (!schedule || typeof schedule !== "object") return null;
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.round(clamp(n, 0, SCHEDULE_MAX_TOKENS)) : 0;
+  };
+  const onset = num(schedule.onset);
+  const halfLife = num(schedule.halfLife);
+  return onset > 0 || halfLife > 0 ? { onset, halfLife } : null;
+}
+
+export function scheduleFactor(schedule, t) {
+  if (!schedule) return 1;
+  let m = 1;
+  if (schedule.onset > 0) m *= 1 - Math.exp((-Math.log(20) * t) / schedule.onset);
+  if (schedule.halfLife > 0) m *= 0.5 ** (Math.max(0, t - schedule.onset) / schedule.halfLife);
+  return clamp(m);
+}
+
+// Full engine env for a regimen: primary technique, optional co-administered technique, optional schedule.
+export function buildLlamaRegimen({ techniqueId, doseMg, coTechniqueId = null, coDoseMg = 0, schedule = null, seed = 0, fixationIds = [] }) {
+  const primary = buildLlamaEnv(techniqueId, doseMg, { seed, fixationIds });
+  let env = primary.env;
+  let coIntensity = null;
+  if (coTechniqueId) {
+    const co = buildLlamaEnv(coTechniqueId, coDoseMg, { seed, fixationIds });
+    coIntensity = co.intensity;
+    const { LLM_INJ_SEED: _seed, ...coEnv } = co.env;
+    const merged = mergeLlamaEnv(primary.env, coEnv);
+    env = {};
+    for (const [key, value] of Object.entries(merged)) env[key] = typeof value === "number" ? String(round(value, 5)) : String(value);
+  }
+  const sched = normalizeSchedule(schedule);
+  const active = Object.keys(env).some((k) => k !== "LLM_INJ_SEED");
+  if (sched && active) {
+    env.LLM_INJ_PK_ONSET = String(sched.onset);
+    env.LLM_INJ_PK_HALFLIFE = String(sched.halfLife);
+  }
+  return { ...primary, env, coTechniqueId: coTechniqueId || null, coDoseMg: coTechniqueId ? normalizeDose(coDoseMg) : null, coIntensity, schedule: sched };
+}
+
 export const DEFAULT_SAMPLING = {
   temperature: 0.7,
   top_p: 0.9,
@@ -430,6 +623,7 @@ export function describeTechnique(techniqueId) {
     sites: t.sites,
     curve: t.curve,
     theme: t.theme || null,
+    requires: t.requires || null,
     support: backendSupport(t.id)
   };
 }

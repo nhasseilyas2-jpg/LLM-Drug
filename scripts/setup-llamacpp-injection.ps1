@@ -53,7 +53,14 @@ $ErrorActionPreference = "Stop"
 if (-not $alreadyPatched) {
     if (-not $SkipCheckout) {
         $dirty = & git -C $LlamaCppDir status --porcelain --untracked-files=no
-        if ($dirty) { throw "$LlamaCppDir has local changes. Commit/stash them or pass -LlamaCppDir to a clean checkout." }
+        if ($dirty) {
+            # an older version of the injection patch: every modified file carries our marker -> restore and re-apply
+            $files = @($dirty | ForEach-Object { $_.Substring(3).Trim() })
+            $ours = @($files | Where-Object { Select-String -Quiet -SimpleMatch -Pattern "llm-injection" -Path (Join-Path $LlamaCppDir $_) })
+            if ($ours.Count -ne $files.Count) { throw "$LlamaCppDir has local changes. Commit/stash them or pass -LlamaCppDir to a clean checkout." }
+            Write-Host "Removing a previous version of the injection patch"
+            Invoke-Git checkout -- @files
+        }
         & git -C $LlamaCppDir cat-file -e "$Commit^{commit}" 2>$null
         if ($LASTEXITCODE -ne 0) { Invoke-Git fetch origin $Commit }
         Write-Host "Checking out pinned llama.cpp commit $Commit"
@@ -76,7 +83,7 @@ if ($Cuda) { $cfg += "-DGGML_CUDA=ON" }
 if ($Vulkan) { $cfg += "-DGGML_VULKAN=ON" }
 & cmake @cfg
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
-& cmake --build $build --config Release --target llama-server -j $Jobs
+& cmake --build $build --config Release --target llama-server llama-cvector-generator -j $Jobs
 if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
 $exe = Get-ChildItem -Path (Join-Path $build "bin") -Recurse -Filter "llama-server*" | Where-Object { $_.Extension -in ".exe", "" } | Select-Object -First 1

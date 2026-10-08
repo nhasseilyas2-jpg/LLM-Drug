@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - run: npm run build
+      - name: Technique docs are up to date
+        run: |
+          node scripts/gen-techniques-doc.mjs
+          git diff --exit-code docs/TECHNIQUES.md
+
+  engine:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch llama.cpp headers at the pinned commit
+        shell: bash
+        run: |
+          git init -q vendor/llama.cpp
+          git -C vendor/llama.cpp remote add origin https://github.com/ggml-org/llama.cpp.git
+          git -C vendor/llama.cpp fetch -q --depth 1 origin "$(tr -d '[:space:]' < llamacpp-injection/patches/LLAMA_CPP_COMMIT)"
+          git -C vendor/llama.cpp checkout -q FETCH_HEAD
+          git -C vendor/llama.cpp apply --check ../../llamacpp-injection/patches/llama.cpp.patch
+      - name: Build engine unit tests
+        run: |
+          cmake -S llamacpp-injection/test -B build/engine-tests -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/engine-tests --config Release
+      - name: Run engine unit tests
+        run: ctest --test-dir build/engine-tests -C Release --output-on-failure
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build patched llama-server
+        run: bash scripts/setup-llamacpp-injection.sh
+      - name: Download a small test model
+        run: |
+          mkdir -p models
+          curl -L --fail -o models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+            https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+      - run: npm run test:e2e

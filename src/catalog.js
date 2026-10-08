@@ -86,9 +86,9 @@ export const TECHNIQUES = {
     analogy: "Psychedelics raise cortical noise and loosen top-down constraints.",
     summary: "Corrupts internal representations with noise and lets improbable tokens intrude.",
     mechanism: [
-      "Residual stream: additive pseudo-noise, RMS = 0.12Ã‚Â·E Ãƒâ€” token RMS, middle 70% of layers",
-      "Logits: Gaussian noise, 0.6Ã‚Â·E logit standard deviations",
-      "Logits: 24 random tokens per step boosted by 3Ã‚Â·E standard deviations"
+      "Residual stream: additive pseudo-noise, RMS = 0.12·E × token RMS, middle 70% of layers",
+      "Logits: Gaussian noise, 0.6·E logit standard deviations",
+      "Logits: 24 random tokens per step boosted by 3·E standard deviations"
     ],
     sites: ["residual", "logits"],
     curve: { ec50: 150, n: 1.8 },
@@ -115,9 +115,9 @@ export const TECHNIQUES = {
     analogy: "Alcohol / sedatives dampen neural gain and blur focus.",
     summary: "Diffuses attention and damps the contribution of late layers, like sluggish, unfocused processing.",
     mechanism: [
-      "Attention: softmax scale Ãƒâ€” (1 Ã¢Ë†â€™ 0.6Ã‚Â·E) in all layers (flatter, less selective attention)",
-      "Residual stream: late-layer updates (depth 0.5Ã¢â‚¬â€œ1.0) scaled by (1 Ã¢Ë†â€™ 0.35Ã‚Â·E)",
-      "Logits: extra temperature 1 + 0.4Ã‚Â·E"
+      "Attention: softmax scale × (1 − 0.6·E) in all layers (flatter, less selective attention)",
+      "Residual stream: late-layer updates (depth 0.5–1.0) scaled by (1 − 0.35·E)",
+      "Logits: extra temperature 1 + 0.4·E"
     ],
     sites: ["attention", "residual", "logits"],
     curve: { ec50: 200, n: 2 },
@@ -141,8 +141,8 @@ export const TECHNIQUES = {
     analogy: "Amnesic agents (e.g. benzodiazepines) block access to recent memory.",
     summary: "Hides a random subset of earlier tokens from attention, so the model loses parts of its context.",
     mechanism: [
-      "KV memory: each cached position hidden with probability 0.95Ã‚Â·E",
-      "Always visible: first 4 positions (attention sinks) and the most recent 48 Ã¢Ë†â€™ 40Ã‚Â·E positions"
+      "KV memory: each cached position hidden with probability 0.95·E",
+      "Always visible: first 4 positions (attention sinks) and the most recent max(8, 48 − 40·E) positions"
     ],
     sites: ["kv"],
     curve: { ec50: 120, n: 1.5 },
@@ -166,9 +166,9 @@ export const TECHNIQUES = {
     analogy: "Stimulants raise gain and narrow focus, at high doses causing rigidity and perseveration.",
     summary: "Sharpens attention and amplifies mid/late layer updates; output becomes over-confident and repetitive.",
     mechanism: [
-      "Attention: softmax scale Ãƒâ€” (1 + 1.0Ã‚Â·E) in all layers (sharper, narrower attention)",
-      "Residual stream: updates at depth 0.4Ã¢â‚¬â€œ0.9 scaled by (1 + 0.25Ã‚Â·E)",
-      "Logits: temperature 1 / (1 + 1.5Ã‚Â·E) (more deterministic)"
+      "Attention: softmax scale × (1 + 1.0·E) in all layers (sharper, narrower attention)",
+      "Residual stream: updates at depth 0.4–0.9 scaled by (1 + 0.25·E)",
+      "Logits: temperature 1 / (1 + 1.5·E) (more deterministic)"
     ],
     sites: ["attention", "residual", "logits"],
     curve: { ec50: 180, n: 2 },
@@ -193,8 +193,8 @@ export const TECHNIQUES = {
     analogy: "Dissociatives (NMDA antagonists) disconnect processing stages from each other.",
     summary: "Progressively switches off a band of middle layers, so early and late processing become disconnected.",
     mechanism: [
-      "Residual stream: updates of layers at depth 0.35Ã¢â‚¬â€œ0.65 scaled by (1 Ã¢Ë†â€™ E); at saturation those blocks are skipped",
-      "Residual stream: small noise (0.03Ã‚Â·E Ãƒâ€” RMS) in the same band"
+      "Residual stream: updates of layers at depth 0.35–0.65 scaled by (1 − E); at saturation those blocks are skipped",
+      "Residual stream: small noise (0.03·E × RMS) in the same band"
     ],
     sites: ["residual"],
     curve: { ec50: 220, n: 3 },
@@ -214,8 +214,8 @@ export const TECHNIQUES = {
     analogy: "Anticholinergic delirium: patchy, unreliable processing and derailed trains of thought.",
     summary: "Randomly silences feed-forward units (knowledge recall) and sometimes vetoes the most likely next token.",
     mechanism: [
-      "Feed-forward: dropout of 45Ã‚Â·E % of output units in every layer (pseudo-random, rescaled)",
-      "Logits: with probability 0.3Ã‚Â·E per step, the top-1 token is pushed to the bottom"
+      "Feed-forward: dropout of 45·E % of output units in every layer (pseudo-random, rescaled)",
+      "Logits: with probability 0.3·E per step, the top-1 token is pushed to the bottom"
     ],
     sites: ["ffn", "logits"],
     curve: { ec50: 160, n: 2 },
@@ -239,8 +239,8 @@ export const TECHNIQUES = {
     analogy: "Fixed false beliefs: certain ideas keep forcing their way into thought.",
     summary: "A persistent bias toward a theme vocabulary (grandiose by default) plus slightly over-focused attention.",
     mechanism: [
-      "Logits: persistent +3Ã‚Â·E standard-deviation bias on the theme words' tokens",
-      "Attention: softmax scale Ãƒâ€” (1 + 0.25Ã‚Â·E)"
+      "Logits: persistent +6·E standard-deviation bias on the first token of each theme word",
+      "Attention: softmax scale × (1 + 0.25·E)"
     ],
     sites: ["logits", "attention"],
     curve: { ec50: 140, n: 1.6 },
@@ -260,9 +260,9 @@ export const TECHNIQUES = {
     analogy: "Threat hypervigilance: everything gets read through a threat lens.",
     summary: "Same mechanism as Delusion with a threat vocabulary, plus a little logit noise.",
     mechanism: [
-      "Logits: persistent +3Ã‚Â·E standard-deviation bias on threat-themed tokens",
-      "Logits: Gaussian noise, 0.2Ã‚Â·E standard deviations",
-      "Attention: softmax scale Ãƒâ€” (1 + 0.25Ã‚Â·E)"
+      "Logits: persistent +6·E standard-deviation bias on threat-themed tokens",
+      "Logits: Gaussian noise, 0.2·E standard deviations",
+      "Attention: softmax scale × (1 + 0.25·E)"
     ],
     sites: ["logits", "attention"],
     curve: { ec50: 140, n: 1.6 },
@@ -283,9 +283,9 @@ export const TECHNIQUES = {
     analogy: "Mild disinhibition: looser associations without full loss of control.",
     summary: "Flattens the next-token distribution and adds light late-layer noise to favor unusual continuations.",
     mechanism: [
-      "Logits: extra temperature 1 + 0.6Ã‚Â·E",
-      "Logits: 48 random tokens per step boosted by 1.2Ã‚Â·E standard deviations",
-      "Residual stream: noise 0.04Ã‚Â·E Ãƒâ€” RMS in the last 40% of layers"
+      "Logits: extra temperature 1 + 0.6·E",
+      "Logits: 48 random tokens per step boosted by 2·E standard deviations",
+      "Residual stream: noise 0.06·E × RMS in the last 40% of layers"
     ],
     sites: ["logits", "residual"],
     curve: { ec50: 150, n: 1.5 },

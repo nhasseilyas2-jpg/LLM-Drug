@@ -4,7 +4,7 @@ import { join } from "node:path";
 const root = process.cwd();
 const src = join(root, "src");
 const dist = join(root, "dist");
-const requiredFiles = ["index.html", "app.js", "drugs.js", "styles.css"];
+const requiredFiles = ["index.html", "app.js", "catalog.js", "metrics.js", "styles.css"];
 
 await rm(dist, { force: true, recursive: true });
 await mkdir(dist, { recursive: true });
@@ -23,7 +23,7 @@ for (const check of checks) {
   }
 }
 
-console.log(`Built static LLM Drugs app to ${dist}`);
+console.log(`Built static LLM Injection Runtime Lab UI to ${dist}`);
 for (const check of checks) {
   console.log(`- ${check.file}: ${check.bytes} bytes`);
 }

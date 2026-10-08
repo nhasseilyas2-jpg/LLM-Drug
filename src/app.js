@@ -1,440 +1,388 @@
-import { DRUGS, createDrugProfile, describeDose } from "./drugs.js";
+import { DOSE_MAX_MG, TECHNIQUES, TECHNIQUE_IDS, describeDose, describeTechnique, hill, parseDoseList } from "./catalog.js";
 
-const elements = {
-  backend: document.querySelector("#backend"),
-  ollamaFields: document.querySelector("#ollama-fields"),
-  llamacppFields: document.querySelector("#llamacpp-fields"),
-  model: document.querySelector("#model"),
-  llamaCliPath: document.querySelector("#llama-cli-path"),
-  llamaModelPath: document.querySelector("#llama-model-path"),
-  llamaTimeoutSeconds: document.querySelector("#llama-timeout-seconds"),
-  llamaMaxTokens: document.querySelector("#llama-max-tokens"),
-  refreshModels: document.querySelector("#refresh-models"),
-  status: document.querySelector("#ollama-status"),
-  drug: document.querySelector("#drug"),
-  drugSummary: document.querySelector("#drug-summary"),
-  dose: document.querySelector("#dose"),
-  doseNumber: document.querySelector("#dose-number"),
-  doseLabel: document.querySelector("#dose-label"),
-  seed: document.querySelector("#seed"),
-  judgeEnabled: document.querySelector("#judge-enabled"),
-  prompt: document.querySelector("#prompt"),
-  expected: document.querySelector("#expected"),
-  memory: document.querySelector("#memory"),
-  doses: document.querySelector("#doses"),
-  trials: document.querySelector("#trials"),
-  objective: document.querySelector("#objective"),
-  run: document.querySelector("#run"),
-  doseResponse: document.querySelector("#dose-response"),
-  chaosAgent: document.querySelector("#chaos-agent"),
-  baselineMeta: document.querySelector("#baseline-meta"),
-  impairedMeta: document.querySelector("#impaired-meta"),
-  copyBaseline: document.querySelector("#copy-baseline"),
-  copyImpaired: document.querySelector("#copy-impaired"),
-  baselineOutput: document.querySelector("#baseline-output"),
-  impairedOutput: document.querySelector("#impaired-output"),
-  metrics: document.querySelector("#metrics"),
-  auditLog: document.querySelector("#audit-log"),
-  doseSummary: document.querySelector("#dose-summary"),
-  doseChart: document.querySelector("#dose-chart"),
-  doseBody: document.querySelector("#dose-body"),
-  doseTrials: document.querySelector("#dose-trials"),
-  agentTrace: document.querySelector("#agent-trace"),
-  refreshHistory: document.querySelector("#refresh-history"),
-  historyBody: document.querySelector("#history-body")
-};
+const $ = (id) => document.getElementById(id);
+const state = { catalog: null, models: { gguf: [], ollama: [] }, technique: "hallucinogen", job: null, record: null, status: null };
 
-function init() {
-  elements.drug.innerHTML = Object.entries(DRUGS)
-    .map(([id, drug]) => `<option value="${id}">${drug.name}</option>`)
-    .join("");
-  bindEvents();
-  updateDrugPreview();
-  updateBackendFields();
-  void loadModels();
-  void loadHistory();
+const esc = (value) =>
+  String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const fmt = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? "–" : Number(v).toFixed(d));
+const ci = (x, d = 2) => (!x || x.mean === null ? "–" : x.lo === null ? fmt(x.mean, d) : `${fmt(x.mean, d)} [${fmt(x.lo, d)}, ${fmt(x.hi, d)}]`);
+
+async function api(path, body) {
+  const response = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
 }
 
-function bindEvents() {
-  elements.backend.addEventListener("input", updateBackendFields);
-  elements.refreshModels.addEventListener("click", loadModels);
-  elements.run.addEventListener("click", runSingle);
-  elements.doseResponse.addEventListener("click", runDoseResponse);
-  elements.chaosAgent.addEventListener("click", runAgentChaos);
-  elements.copyBaseline.addEventListener("click", () => copyText(elements.baselineOutput.textContent, "Baseline copied."));
-  elements.copyImpaired.addEventListener("click", () => copyText(elements.impairedOutput.textContent, "Runtime-drugged response copied."));
-  elements.refreshHistory.addEventListener("click", loadHistory);
-  elements.drug.addEventListener("input", updateDrugPreview);
-  elements.dose.addEventListener("input", () => {
-    elements.doseNumber.value = elements.dose.value;
-    updateDrugPreview();
-  });
-  elements.doseNumber.addEventListener("input", () => {
-    elements.dose.value = elements.doseNumber.value;
-    updateDrugPreview();
-  });
+function message(text, tone = "") {
+  $("message").textContent = text;
+  $("message").className = `message ${tone}`;
+}
+
+// ---------------------------------------------------------------- setup panel
+
+async function loadStatus() {
+  try {
+    state.status = await api("/api/status");
+    const llama = state.status.llamaServer.available;
+    $("status").innerHTML = `<span class="pill ${llama ? "ok" : "bad"}">llama-server ${llama ? "ready" : "missing"}</span>` +
+      `<span class="pill ${state.models.ollamaError ? "bad" : "ok"}">Ollama ${state.models.ollamaError ? "offline" : "online"}</span>`;
+  } catch (error) {
+    $("status").innerHTML = `<span class="pill bad">API offline</span>`;
+  }
 }
 
 async function loadModels() {
-  if (elements.backend.value === "llamacpp") {
-    setStatus("llama.cpp backend selected. Set paths, then run from the UI.", "pending");
-    return;
-  }
-  setStatus("Checking Ollama...", "pending");
-  elements.refreshModels.disabled = true;
   try {
-    const data = await getJson("/api/models");
-    if (!data.models.length) {
-      elements.model.innerHTML = "<option value=\"\">No Ollama models found</option>";
-      setStatus(`Connected to ${data.host}, but no models are installed.`, "error");
-      return;
-    }
-    elements.model.innerHTML = data.models
-      .map((model) => `<option value="${escapeHtml(model.name)}">${escapeHtml(model.name)}</option>`)
-      .join("");
-    setStatus(`Connected to ${data.host}. ${data.models.length} model${data.models.length === 1 ? "" : "s"} available.`, "ok");
+    state.models = await api("/api/models");
   } catch (error) {
-    elements.model.innerHTML = "<option value=\"\">Ollama unavailable</option>";
-    setStatus(error.message, "error");
-  } finally {
-    elements.refreshModels.disabled = false;
+    message(`Could not list models: ${error.message}`, "error");
   }
+  renderModels();
+  const judge = $("judge");
+  const current = judge.value;
+  judge.innerHTML = `<option value="">None</option>` + state.models.ollama.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("");
+  judge.value = current;
+  loadStatus();
 }
 
-async function runSingle() {
-  setBusy(true, "Running baseline and runtime-drugged calls...");
-  elements.baselineOutput.textContent = "Running baseline...";
-  elements.impairedOutput.textContent = "Running runtime perturbation...";
-  elements.baselineMeta.textContent = "Calling selected model with 0 mg runtime settings...";
-  elements.impairedMeta.textContent = "Calling selected model with runtime drug settings...";
-
-  try {
-    const result = await postJson("/api/run", currentInput());
-    elements.baselineOutput.textContent = result.baseline.answer;
-    elements.impairedOutput.textContent = result.response;
-    elements.baselineMeta.textContent = `${labelModel(result)} · 0 mg · ${result.audit.messageFingerprint}`;
-    elements.impairedMeta.textContent = `${result.profile.drug.name} ${result.profile.doseMg} mg · survival ${result.metrics.survivalScore}% · impairment ${result.metrics.impairmentScore}%`;
-    renderMetrics(result.metrics, result.judge);
-    renderAudit(result.audit);
-    setStatus(`Run complete. Messages identical: ${result.audit.messagesIdentical ? "yes" : "no"}.`, "ok");
-    await loadHistory();
-  } catch (error) {
-    setStatus(error.message, "error");
-    renderAudit({ error: error.message });
-  } finally {
-    setBusy(false);
-  }
+function renderModels() {
+  const backend = $("backend").value;
+  const list = backend === "llamacpp" ? state.models.gguf : state.models.ollama;
+  const previous = $("model").value;
+  $("model").innerHTML = list.length
+    ? list.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}${m.size ? ` · ${(m.size / 1e9).toFixed(1)} GB` : ""}</option>`).join("")
+    : `<option value="">(no models found)</option>`;
+  if (list.some((m) => m.id === previous)) $("model").value = previous;
+  $("backendHint").textContent =
+    backend === "llamacpp"
+      ? "Patched llama-server. Every technique acts inside the forward pass or on the logits. GGUF files come from ./models and from Ollama's blob store."
+      : state.models.ollamaError
+        ? `Ollama is not reachable: ${state.models.ollamaError}`
+        : "Ollama exposes only sampling options. Techniques are approximated there, and some are unavailable.";
+  renderTechniques();
 }
 
-async function runDoseResponse() {
-  setBusy(true, "Running dose-response batch...");
-  elements.doseSummary.textContent = "Running...";
-  elements.doseBody.innerHTML = "<tr><td colspan=\"6\">Batch in progress. Large local models can take a while.</td></tr>";
-  elements.doseTrials.innerHTML = "";
-
-  try {
-    const result = await postJson("/api/dose-response", currentInput());
-    renderDoseResponse(result);
-    setStatus(`Dose-response complete: ${result.rows.length} real calls stored.`, "ok");
-    await loadHistory();
-  } catch (error) {
-    setStatus(error.message, "error");
-  } finally {
-    setBusy(false);
-  }
+function renderTechniques() {
+  const backend = $("backend").value;
+  $("techniques").innerHTML = TECHNIQUE_IDS.map((id) => {
+    const t = TECHNIQUES[id];
+    const support = backend === "llamacpp" ? "full" : t.ollamaSupport;
+    return `<button type="button" role="radio" aria-checked="${id === state.technique}" class="technique ${id === state.technique ? "selected" : ""} support-${support}" data-id="${id}" ${support === "none" ? "disabled" : ""}>
+      <strong>${esc(t.name)}</strong><span>${esc(t.category)}</span>${support !== "full" ? `<em>${support === "none" ? "llama.cpp only" : "approx."}</em>` : ""}</button>`;
+  }).join("");
+  if (backend === "ollama" && TECHNIQUES[state.technique].ollamaSupport === "none") selectTechnique("hallucinogen");
+  else renderTechniqueInfo();
 }
 
-async function runAgentChaos() {
-  setBusy(true, "Running impaired agent loop...");
-  elements.agentTrace.textContent = "Agent chaos run in progress...";
-
-  try {
-    const result = await postJson("/api/chaos-agent", {
-      ...currentInput(),
-      objective: elements.objective.value,
-      steps: 4
-    });
-    elements.agentTrace.innerHTML = result.steps
-      .map((step) => `
-        <section class="trace-step">
-          <strong>Step ${step.step}</strong>
-          <p>Fingerprint: ${escapeHtml(step.messageFingerprint)}</p>
-          <pre>${escapeHtml(step.output)}</pre>
-          <p>Coherence ${step.metrics.coherence}% · Impairment ${step.metrics.impairmentScore}% · Survival ${step.metrics.survivalScore}%</p>
-        </section>
-      `)
-      .join("");
-    setStatus("Agent chaos run complete.", "ok");
-    await loadHistory();
-  } catch (error) {
-    setStatus(error.message, "error");
-    elements.agentTrace.textContent = error.message;
-  } finally {
-    setBusy(false);
-  }
+function selectTechnique(id) {
+  state.technique = id;
+  const t = TECHNIQUES[id];
+  $("theme").value = (t.theme || []).join(", ");
+  $("themeWrap").classList.toggle("hidden", !t.theme);
+  renderTechniques();
 }
 
-async function loadHistory() {
-  try {
-    const data = await getJson("/api/history?limit=25");
-    elements.historyBody.innerHTML = data.items.length
-      ? data.items.map(renderHistoryRow).join("")
-      : "<tr><td colspan=\"6\">No persisted runs yet.</td></tr>";
-  } catch (error) {
-    elements.historyBody.innerHTML = `<tr><td colspan="6">${escapeHtml(error.message)}</td></tr>`;
-  }
+function renderTechniqueInfo() {
+  const d = describeTechnique(state.technique);
+  const backend = $("backend").value;
+  const support = backend === "llamacpp" ? "full" : d.support.ollama;
+  const sites = d.sites.length ? d.sites.map((s) => `<span class="tag">${esc(s)}</span>`).join("") : `<span class="tag">none</span>`;
+  $("techniqueInfo").innerHTML = `
+    <p><strong>${esc(d.name)}</strong> — ${esc(d.summary)}</p>
+    <p class="hint">Analogy: ${esc(d.analogy)}</p>
+    <ul>${d.mechanism.map((m) => `<li>${esc(m)}</li>`).join("")}</ul>
+    <p class="hint">Sites: ${sites} · Hill EC50 ${d.curve.ec50} mg, n = ${d.curve.n} · E = effect intensity (0–1)</p>
+    ${support === "approximate" ? `<p class="warn">On Ollama this technique is approximated with sampler options only (temperature, top-p/top-k, mirostat, context size). It is not the same mechanism.</p>` : ""}`;
+  renderDose();
+}
+
+function renderDose() {
+  const dose = Number($("dose").value);
+  const curve = TECHNIQUES[state.technique].curve;
+  const e = hill(dose, curve);
+  $("doseLabel").textContent = `${dose} mg → intensity E = ${e.toFixed(3)} (${describeDose(state.technique, dose)})`;
+  const W = 320, H = 120, P = 18;
+  const x = (d) => P + (d / DOSE_MAX_MG) * (W - 2 * P);
+  const y = (v) => H - P - v * (H - 2 * P);
+  let path = "";
+  for (let d = 0; d <= DOSE_MAX_MG; d += 5) path += `${d ? "L" : "M"}${x(d).toFixed(1)},${y(hill(d, curve)).toFixed(1)}`;
+  $("curve").innerHTML = `
+    <line x1="${P}" y1="${y(0)}" x2="${W - P}" y2="${y(0)}" class="axis"/>
+    <line x1="${P}" y1="${y(0)}" x2="${P}" y2="${y(1)}" class="axis"/>
+    <line x1="${x(curve.ec50)}" y1="${y(0)}" x2="${x(curve.ec50)}" y2="${y(0.5)}" class="guide"/>
+    <path d="${path}" class="line"/>
+    <circle cx="${x(dose)}" cy="${y(e)}" r="4" class="dot"/>
+    <text x="${P}" y="${H - 3}" class="label">0</text><text x="${W - P - 24}" y="${H - 3}" class="label">500 mg</text>
+    <text x="${x(curve.ec50) + 3}" y="${y(0.5) - 3}" class="label">EC50</text><text x="2" y="${y(1) + 4}" class="label">1</text>`;
+}
+
+function setDose(value) {
+  const v = Math.min(DOSE_MAX_MG, Math.max(0, Number(value) || 0));
+  $("dose").value = v;
+  $("doseNumber").value = v;
+  renderDose();
 }
 
 function currentInput() {
+  const num = (id) => Number($(id).value);
   return {
-    model: elements.model.value,
-    backend: elements.backend.value,
-    llamaCliPath: elements.llamaCliPath.value,
-    llamaModelPath: elements.llamaModelPath.value,
-    llamaTimeoutSeconds: elements.llamaTimeoutSeconds.value,
-    llamaMaxTokens: elements.llamaMaxTokens.value,
-    drugId: elements.drug.value,
-    doseMg: elements.doseNumber.value,
-    seed: elements.seed.value,
-    prompt: elements.prompt.value,
-    expected: elements.expected.value,
-    memory: elements.memory.value,
-    doses: elements.doses.value,
-    trials: elements.trials.value,
-    judgeEnabled: elements.judgeEnabled.checked
+    backend: $("backend").value,
+    modelId: $("model").value,
+    techniqueId: state.technique,
+    doseMg: num("dose"),
+    prompt: $("prompt").value,
+    memory: $("memory").value,
+    expected: $("expected").value,
+    system: $("system").value,
+    theme: $("theme").value,
+    seed: num("seed"),
+    noiseFloor: $("noiseFloor").checked,
+    judgeModelId: $("judge").value,
+    sampling: Object.fromEntries(["temperature", "top_p", "top_k", "min_p", "repeat_penalty", "max_tokens", "num_ctx"].map((k) => [k, num(k)])),
+    doses: parseDoseList($("doses").value),
+    trials: num("trials"),
+    reseedInjection: $("reseed").checked,
+    steps: num("steps")
   };
 }
 
-function updateBackendFields() {
-  const isLlamaCpp = elements.backend.value === "llamacpp";
-  elements.ollamaFields.classList.toggle("hidden", isLlamaCpp);
-  elements.llamacppFields.classList.toggle("hidden", !isLlamaCpp);
-  elements.judgeEnabled.disabled = isLlamaCpp;
-  if (isLlamaCpp) {
-    elements.judgeEnabled.checked = false;
-    setStatus("llama.cpp backend selected. It runs patched llama-cli.exe directly from the UI.", "pending");
-  } else {
-    void loadModels();
-  }
-}
+// ---------------------------------------------------------------- jobs
 
-function updateDrugPreview() {
-  const profile = createDrugProfile({
-    drugId: elements.drug.value,
-    doseMg: elements.doseNumber.value,
-    seed: elements.seed.value
-  });
-  elements.drugSummary.textContent = profile.drug.focus;
-  elements.doseLabel.textContent = `${profile.doseMg} mg - ${describeDose(profile.doseMg)}`;
-}
-
-function labelModel(result) {
-  if (result.backend === "llamacpp") {
-    return `llama.cpp · ${result.audit.llamaModelPath || result.model}`;
-  }
-  return result.model;
-}
-
-function renderMetrics(metrics, judge) {
-  const labels = {
-    accuracyEstimate: "Accuracy estimate",
-    survivalScore: "Survival",
-    impairmentScore: "Impairment",
-    divergence: "Divergence",
-    coherence: "Coherence",
-    hallucinationRisk: "Hallucination risk",
-    memoryRisk: "Memory risk",
-    reasoningRisk: "Reasoning risk"
-  };
-  elements.metrics.classList.remove("empty");
-  elements.metrics.innerHTML = Object.entries(labels)
-    .map(([key, label]) => {
-      const value = metrics[key];
-      const riskMetric = /risk|impairment|divergence/i.test(key);
-      const tone = riskMetric
-        ? value > 70 ? "danger" : value > 35 ? "warn" : "safe"
-        : value < 35 ? "danger" : value < 70 ? "warn" : "safe";
-      return `
-        <div class="metric">
-          <div class="metric-row">
-            <span>${label}</span>
-            <strong>${value}%</strong>
-          </div>
-          <div class="bar"><span class="${tone}" style="width: ${value}%"></span></div>
-        </div>
-      `;
-    })
-    .join("") + (judge ? `<pre class="judge">${escapeHtml(JSON.stringify(judge.parsed || judge.raw || judge.error, null, 2))}</pre>` : "");
-}
-
-function renderAudit(audit) {
-  if (audit.error) {
-    elements.auditLog.innerHTML = `<li>${escapeHtml(audit.error)}</li>`;
-    return;
-  }
-  elements.auditLog.innerHTML = [
-    `Backend: ${audit.backend}.`,
-    `Messages identical: ${audit.messagesIdentical ? "yes" : "no"}.`,
-    `Message fingerprint: ${audit.messageFingerprint}.`,
-    `Changed runtime options: ${audit.optionDiff.map((item) => `${item.key} ${item.baseline} -> ${item.impaired}`).join(", ") || "none"}.`
-  ].map((item) => `<li>${escapeHtml(item)}</li>`).join("");
-}
-
-function renderDoseResponse(result) {
-  elements.doseSummary.textContent = `${result.rows.length} trials · ${result.model}`;
-  elements.doseChart.innerHTML = result.summary
-    .map((row) => `
-      <div class="dose-bar">
-        <span>${row.doseMg} mg</span>
-        <div><b style="width:${row.survivalScore}%"></b></div>
-        <strong>${row.survivalScore}%</strong>
-      </div>
-    `)
-    .join("");
-  elements.doseBody.innerHTML = result.summary
-    .map((row) => `
-      <tr>
-        <td>${row.doseMg} mg</td>
-        <td>${row.trials}</td>
-        <td>${row.passed}/${row.trials}</td>
-        <td>${row.survivalScore}%</td>
-        <td>${row.impairmentScore}%</td>
-        <td>${row.hallucinationRisk}%</td>
-      </tr>
-    `)
-    .join("");
-  elements.doseTrials.innerHTML = result.rows
-    .map((row) => `
-      <details class="response-detail">
-        <summary>
-          <strong>${row.doseMg} mg · trial ${row.trial + 1}</strong>
-          <span>Survival ${row.metrics.survivalScore}% · Impairment ${row.metrics.impairmentScore}% · ${row.metrics.passed ? "passed" : "failed"}</span>
-        </summary>
-        <pre>${escapeHtml(row.response)}</pre>
-      </details>
-    `)
-    .join("");
-}
-
-function renderHistoryRow(item) {
-  const profile = item.profile || {};
-  const result = item.metrics
-    ? `${item.metrics.survivalScore}% survival`
-    : item.summary
-      ? `${item.summary.length} doses`
-      : item.steps
-        ? `${item.steps.length} steps`
-        : "";
-  const output = getHistoryOutput(item);
-  return `
-    <tr>
-      <td>${escapeHtml(new Date(item.timestamp).toLocaleString())}</td>
-      <td>${escapeHtml(item.type)}</td>
-      <td>${escapeHtml(item.model || "")}</td>
-      <td>${escapeHtml(profile.drug?.name || item.drugId || "")} ${profile.doseMg ?? ""}${profile.doseMg !== undefined ? " mg" : ""}</td>
-      <td>${escapeHtml(result)}</td>
-      <td class="history-output">${renderOutputDetails(output)}</td>
-    </tr>
-  `;
-}
-
-function getHistoryOutput(item) {
-  if (item.response) {
-    return {
-      label: "Runtime-drugged response",
-      text: item.response
-    };
-  }
-  if (item.rows?.length) {
-    return {
-      label: `${item.rows.length} dose trial responses`,
-      text: item.rows.map((row) => `${row.doseMg} mg trial ${row.trial + 1}:\n${row.response}`).join("\n\n---\n\n")
-    };
-  }
-  if (item.steps?.length) {
-    return {
-      label: `${item.steps.length} agent step outputs`,
-      text: item.steps.map((step) => `Step ${step.step}:\n${step.output}`).join("\n\n---\n\n")
-    };
-  }
-  return {
-    label: "No output",
-    text: ""
-  };
-}
-
-function renderOutputDetails(output) {
-  if (!output.text) {
-    return "<span class=\"muted\">No output captured.</span>";
-  }
-  return `
-    <details class="inline-detail">
-      <summary>${escapeHtml(output.label)} · ${escapeHtml(previewText(output.text, 90))}</summary>
-      <pre>${escapeHtml(output.text)}</pre>
-    </details>
-  `;
-}
-
-async function getJson(url) {
-  const response = await fetch(url);
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data.error || `Request failed with ${response.status}.`);
-  }
-  return data;
-}
-
-async function postJson(url, body) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data.error || `Request failed with ${response.status}.`);
-  }
-  return data;
-}
-
-function setBusy(isBusy, message = "") {
-  for (const button of [elements.run, elements.doseResponse, elements.chaosAgent, elements.refreshModels]) {
-    button.disabled = isBusy;
-  }
-  if (message) {
-    setStatus(message, "pending");
-  }
-}
-
-function setStatus(message, tone) {
-  elements.status.textContent = message;
-  elements.status.dataset.tone = tone;
-}
-
-async function copyText(value, message) {
+async function startJob(kind) {
+  if (state.job) return;
+  const input = currentInput();
+  if (!input.modelId) return message("Select a model first.", "error");
   try {
-    await navigator.clipboard.writeText(value || "");
-    setStatus(message, "ok");
+    const job = await api(`/api/${kind}`, input);
+    state.job = job.id;
+    setBusy(true);
+    message("");
+    pollJob();
+  } catch (error) {
+    message(error.message, "error");
+  }
+}
+
+async function pollJob() {
+  if (!state.job) return;
+  try {
+    const job = await api(`/api/jobs/${state.job}`);
+    const p = job.progress || { done: 0, total: 1 };
+    $("progressFill").style.width = `${Math.round((100 * p.done) / Math.max(1, p.total))}%`;
+    $("progressText").textContent = `${job.status}: ${p.message || ""} (${p.done}/${p.total})`;
+    if (job.status === "queued" || job.status === "running") return void setTimeout(pollJob, 700);
+    state.job = null;
+    setBusy(false);
+    if (job.status === "done") {
+      showRecord(job.result);
+      loadHistory();
+      message("Done.", "ok");
+    } else {
+      message(job.status === "cancelled" ? "Cancelled." : `Error: ${job.error}`, job.status === "cancelled" ? "" : "error");
+    }
+  } catch (error) {
+    state.job = null;
+    setBusy(false);
+    message(error.message, "error");
+  }
+}
+
+function setBusy(busy) {
+  $("progress").classList.toggle("hidden", !busy);
+  for (const id of ["runTrial", "runSweep", "runAgent"]) $(id).disabled = busy;
+}
+
+// ---------------------------------------------------------------- results
+
+function metricsTable(m) {
+  if (!m) return "";
+  const rows = [
+    ["Impairment (heuristic, 0–100)", fmt(m.impairment, 1), ""],
+    ["Divergence from baseline", fmt(m.divergence), m.noiseFloor === null ? "" : `noise floor ${fmt(m.noiseFloor)} → excess ${fmt(m.excessDivergence)}`],
+    ["Garble rate", fmt(m.treated.garble), `baseline ${fmt(m.baseline.garble)}`],
+    ["Repetition (repeated 3-grams)", fmt(m.treated.repetition), `baseline ${fmt(m.baseline.repetition)}`],
+    ["Script switches / 100 letters", fmt(m.treated.scriptSwitch), `baseline ${fmt(m.baseline.scriptSwitch)}`],
+    ["Length (words)", m.treated.words, `baseline ${m.baseline.words}`]
+  ];
+  if (m.anchor) rows.push(["Expected anchor present", m.anchor.treated ? "yes" : "no", `baseline ${m.anchor.baseline ? "yes" : "no"}`]);
+  const it = m.internal?.treated;
+  const ib = m.internal?.baseline;
+  if (it) {
+    rows.push(["Top-5 entropy (nats)", fmt(it.entropy), ib ? `baseline ${fmt(ib.entropy)}` : ""]);
+    rows.push(["Surprisal of chosen tokens", fmt(it.surprisal), ib ? `baseline ${fmt(ib.surprisal)}` : ""]);
+  }
+  return `<table class="metrics"><tbody>${rows.map((r) => `<tr><th>${esc(r[0])}</th><td>${esc(r[1])}</td><td class="hint">${esc(r[2])}</td></tr>`).join("")}</tbody></table>`;
+}
+
+function auditBlock(treatment, engine) {
+  const parts = [];
+  if (treatment?.kind === "llamacpp") {
+    parts.push(`<pre>${esc(Object.entries(treatment.env || {}).map(([k, v]) => `${k}=${v}`).join("\n") || "(no LLM_INJ_* variables)")}</pre>`);
+    if (engine) {
+      parts.push(`<p>Engine: <code>${esc(engine.active || "inactive (no perturbation)")}</code></p>`);
+      parts.push(`<p>Sites fired: ${engine.sitesFired?.length ? engine.sitesFired.map((s) => `<span class="tag">${esc(s)}</span>`).join("") : "none"}</p>`);
+      if (engine.warnings?.length) parts.push(`<p class="warn">${esc(engine.warnings.join("; "))}</p>`);
+    }
+  } else if (treatment?.kind === "ollama") {
+    parts.push(treatment.changes?.length
+      ? `<table class="metrics"><tbody>${treatment.changes.map((c) => `<tr><th>${esc(c.key)}</th><td>${esc(c.baseline)} → ${esc(c.treated)}</td></tr>`).join("")}</tbody></table>`
+      : "<p>No option changes (placebo or zero dose).</p>");
+  }
+  return `<details class="audit"><summary>Treatment audit (intensity ${fmt(treatment?.intensity, 3)})</summary>${parts.join("")}</details>`;
+}
+
+function judgeBlock(judge) {
+  if (!judge) return "";
+  if (judge.error) return `<p class="warn">Judge (${esc(judge.model)}) failed: ${esc(judge.error)}</p>`;
+  const row = (name, s) => `<tr><th>${name}</th><td>${s?.coherence ?? "–"}</td><td>${s?.on_task ?? "–"}</td><td>${s?.factual ?? "–"}</td></tr>`;
+  return `<h3>Blind judge: ${esc(judge.model)}</h3><table class="metrics"><thead><tr><th></th><th>Coherence</th><th>On task</th><th>Factual</th></tr></thead>
+    <tbody>${row("Baseline", judge.baseline)}${row("Treated", judge.treated)}</tbody></table><p class="hint">${esc(judge.notes)}</p>`;
+}
+
+function arms(cols) {
+  return `<div class="arms">${cols.map(([title, text, note]) => `<article class="arm"><header><h3>${esc(title)}</h3><span class="hint">${esc(note || "")}</span></header><pre class="output">${esc(text)}</pre></article>`).join("")}</div>`;
+}
+
+function header(record) {
+  const t = TECHNIQUES[record.techniqueId];
+  const dose = record.doseMg !== undefined && record.doseMg !== null ? ` · ${record.doseMg} mg` : "";
+  return `<p class="record-head"><strong>${esc(t ? t.name : record.techniqueId)}</strong>${esc(dose)} · ${esc(record.backend)} · ${esc(record.model)} · <span class="hint">${esc(new Date(record.timestamp).toLocaleString())}</span>${record.legacy ? ` <span class="tag warn">legacy record</span>` : ""}</p>`;
+}
+
+function renderRun(r) {
+  const cols = [["Baseline", r.arms.baseline.content, `seed ${r.arms.baseline.seed}`]];
+  if (r.arms.noise) cols.push(["Noise floor (untreated, other seed)", r.arms.noise.content, `seed ${r.arms.noise.seed}`]);
+  cols.push(["Treated", r.arms.treated.content, `seed ${r.arms.treated.seed} · ${r.arms.treated.ms} ms`]);
+  return header(r) + arms(cols) + metricsTable(r.metrics) + judgeBlock(r.judge) + auditBlock(r.treatment, r.arms.treated.engine);
+}
+
+function doseChart(summary) {
+  const W = 560, H = 220, P = 36;
+  const x = (d) => P + (d / DOSE_MAX_MG) * (W - 2 * P);
+  const y = (v) => H - P - Math.max(0, Math.min(1, v)) * (H - 2 * P);
+  const series = [
+    ["impairment", (s) => s.impairment, 100, "s1"],
+    ["excess divergence", (s) => s.excessDivergence, 1, "s2"]
+  ];
+  let svg = `<line x1="${P}" y1="${y(0)}" x2="${W - P}" y2="${y(0)}" class="axis"/><line x1="${P}" y1="${y(0)}" x2="${P}" y2="${y(1)}" class="axis"/>`;
+  for (const d of [0, 100, 200, 300, 400, 500]) svg += `<text x="${x(d) - 8}" y="${H - P + 14}" class="label">${d}</text>`;
+  svg += `<text x="${W - P - 20}" y="${H - 4}" class="label">mg</text><text x="4" y="${y(1) + 4}" class="label">max</text>`;
+  for (const [name, get, scale, cls] of series) {
+    const pts = summary.map((s) => ({ d: s.doseMg, v: get(s) })).filter((p) => p.v && p.v.mean !== null);
+    svg += `<path class="line ${cls}" d="${pts.map((p, i) => `${i ? "L" : "M"}${x(p.d).toFixed(1)},${y(p.v.mean / scale).toFixed(1)}`).join("")}"/>`;
+    for (const p of pts) {
+      if (p.v.lo !== null) svg += `<line class="err ${cls}" x1="${x(p.d)}" x2="${x(p.d)}" y1="${y(p.v.lo / scale)}" y2="${y(p.v.hi / scale)}"/>`;
+      svg += `<circle class="dot ${cls}" cx="${x(p.d)}" cy="${y(p.v.mean / scale)}" r="3.5"/>`;
+    }
+  }
+  const legend = series.map(([name, , scale, cls]) => `<span class="legend ${cls}">${esc(name)}${scale === 100 ? " (/100)" : ""}</span>`).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Dose-response chart">${svg}</svg><div>${legend} <span class="hint">error bars: bootstrap 95% CI over trials</span></div>`;
+}
+
+function renderSweep(r) {
+  const table = `<table class="metrics"><thead><tr><th>Dose</th><th>n</th><th>Impairment</th><th>Excess divergence</th><th>Garble</th><th>Repetition</th><th>Anchor kept</th><th>Entropy</th></tr></thead><tbody>
+    ${r.summary.map((s) => `<tr><th>${s.doseMg} mg</th><td>${s.n}</td><td>${ci(s.impairment, 1)}</td><td>${ci(s.excessDivergence)}</td><td>${ci(s.garble)}</td><td>${ci(s.repetition)}</td><td>${ci(s.anchorTreated)}</td><td>${ci(s.entropy)}</td></tr>`).join("")}
+  </tbody></table>`;
+  const samples = r.rows.filter((row) => row.trial === 0).map((row) => [`${row.doseMg} mg (E = ${fmt(row.intensity, 2)})`, row.treated.content, `trial 1 · impairment ${fmt(row.metrics.impairment, 1)}`]);
+  return header(r) + doseChart(r.summary) + table +
+    `<details open><summary>Trial 1 outputs</summary>${arms([["Baseline", r.baselines[0].baseline.content, `seed ${r.baselines[0].seed}`], ...samples])}</details>` +
+    auditBlock(r.rows[r.rows.length - 1]?.treatment, r.rows[r.rows.length - 1]?.treated.engine);
+}
+
+function renderAgent(r) {
+  return header(r) + r.steps.map((s) => `<h3>Step ${s.step} <span class="hint">divergence ${fmt(s.metrics.divergence)} · impairment ${fmt(s.metrics.impairment, 1)}</span></h3>` +
+    arms([["Baseline trajectory", s.baseline.content], ["Treated trajectory", s.treated.content]])).join("") +
+    auditBlock(r.treatment, r.steps[r.steps.length - 1]?.treated.engine);
+}
+
+function renderLegacy(r) {
+  const text = typeof r.response === "string" ? r.response : JSON.stringify(r.response ?? r.rows ?? r.steps, null, 2);
+  return header(r) + `<p class="warn">Recorded by the pre-1.0 prototype. Its metrics used a different, partly dose-derived formula and are not comparable.</p>` +
+    arms([["Baseline", r.baseline?.answer ?? ""], ["Response", text]]);
+}
+
+function showRecord(record) {
+  state.record = record;
+  const view = record.legacy ? renderLegacy : record.type === "run" ? renderRun : record.type === "dose-response" ? renderSweep : renderAgent;
+  $("results").innerHTML = view(record);
+  $("exportJson").disabled = false;
+  $("exportCsv").disabled = record.legacy;
+}
+
+// ---------------------------------------------------------------- history & export
+
+async function loadHistory() {
+  try {
+    const { items } = await api("/api/history?limit=60");
+    $("history").innerHTML = items.length
+      ? items.map((item, i) => `<button type="button" class="history-item" data-index="${i}">
+          <span>${esc(item.type)}</span><strong>${esc(TECHNIQUES[item.techniqueId]?.name || item.techniqueId || "–")}</strong>
+          <span>${item.doseMg !== undefined && item.doseMg !== null ? `${item.doseMg} mg` : item.input?.doses ? `${item.input.doses.join("/")} mg` : ""}</span>
+          <span class="hint">${esc(item.model)}</span><span class="hint">${esc(new Date(item.timestamp).toLocaleString())}</span>${item.legacy ? `<span class="tag warn">legacy</span>` : ""}</button>`).join("")
+      : `<p class="empty">No runs yet.</p>`;
+    state.history = items;
+  } catch (error) {
+    $("history").innerHTML = `<p class="warn">${esc(error.message)}</p>`;
+  }
+}
+
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function recordToCsv(r) {
+  const head = ["id", "type", "technique", "backend", "model", "dose_mg", "trial", "seed", "intensity", "impairment", "divergence", "noise_floor", "excess_divergence", "garble", "repetition", "script_switch", "anchor", "entropy", "surprisal", "words"];
+  const line = (dose, trial, seed, intensity, m) => [r.id, r.type, r.techniqueId, r.backend, JSON.stringify(r.model), dose, trial, seed, intensity, m.impairment, m.divergence, m.noiseFloor ?? "", m.excessDivergence,
+    m.treated.garble, m.treated.repetition, m.treated.scriptSwitch, m.anchor ? m.anchor.treated : "", m.internal?.treated?.entropy ?? "", m.internal?.treated?.surprisal ?? "", m.treated.words].join(",");
+  const rows = r.type === "run" ? [line(r.doseMg, 0, r.arms.treated.seed, r.intensity, r.metrics)]
+    : r.type === "dose-response" ? r.rows.map((row) => line(row.doseMg, row.trial, row.seed, row.intensity, row.metrics))
+    : r.steps.map((s) => line(r.doseMg, s.step, s.treated.seed, r.intensity, s.metrics));
+  return `${head.join(",")}\n${rows.join("\n")}\n`;
+}
+
+// ---------------------------------------------------------------- wiring
+
+function bind() {
+  $("backend").addEventListener("change", renderModels);
+  $("refreshModels").addEventListener("click", loadModels);
+  $("techniques").addEventListener("click", (event) => {
+    const button = event.target.closest(".technique");
+    if (button && !button.disabled) selectTechnique(button.dataset.id);
+  });
+  $("dose").addEventListener("input", () => setDose($("dose").value));
+  $("doseNumber").addEventListener("input", () => setDose($("doseNumber").value));
+  $("runTrial").addEventListener("click", () => startJob("run"));
+  $("runSweep").addEventListener("click", () => startJob("dose-response"));
+  $("runAgent").addEventListener("click", () => startJob("agent"));
+  $("cancel").addEventListener("click", () => state.job && api(`/api/jobs/${state.job}/cancel`, {}).catch(() => {}));
+  $("refreshHistory").addEventListener("click", loadHistory);
+  $("history").addEventListener("click", async (event) => {
+    const item = event.target.closest(".history-item");
+    if (item) showRecord(state.history[Number(item.dataset.index)]);
+  });
+  $("exportJson").addEventListener("click", () => state.record && download(`${state.record.id}.json`, JSON.stringify(state.record, null, 2), "application/json"));
+  $("exportCsv").addEventListener("click", () => state.record && download(`${state.record.id}.csv`, recordToCsv(state.record), "text/csv"));
+}
+
+async function init() {
+  bind();
+  try {
+    state.catalog = await api("/api/catalog");
+    $("system").value = state.catalog.defaults.system;
   } catch {
-    setStatus("Copy failed; select the text manually.", "error");
+    // static preview without the API
   }
-}
-
-function previewText(value, maxLength) {
-  const normalized = String(value || "").replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-  return `${normalized.slice(0, maxLength - 1)}…`;
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+  selectTechnique(state.technique);
+  setDose(150);
+  await loadModels();
+  await loadHistory();
 }
 
 init();

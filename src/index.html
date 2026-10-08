@@ -1,253 +1,128 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>LLM Drugs Runtime Lab</title>
-    <link rel="stylesheet" href="./styles.css">
-  </head>
-  <body>
-    <header class="hero">
-      <nav>
-        <strong>LLM Drugs</strong>
-        <span>Runtime perturbation lab</span>
-      </nav>
-      <section>
-        <p class="eyebrow">No prompt simulation</p>
-        <h1>Drug the inference runtime, not the prompt.</h1>
-        <p>
-          Baseline and impaired calls use identical messages. The drug layer changes only
-          Ollama runtime controls, then records dose curves, evaluator scores, and chaos-agent traces.
-        </p>
-      </section>
-    </header>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM Injection Runtime Lab</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>LLM Injection Runtime Lab</h1>
+      <p class="subtitle">Dose-controlled perturbation of local language models: logits, attention, residual stream, feed-forward and KV memory.</p>
+    </div>
+    <div class="status" id="status"></div>
+  </header>
 
-    <main class="layout">
-      <aside class="panel controller">
-        <div class="section-title">
-          <p class="eyebrow">Controller</p>
-          <h2>Runtime drug setup</h2>
-        </div>
-
-        <label>
-          Backend
+  <main class="layout">
+    <section class="panel setup" aria-label="Experiment setup">
+      <h2>1. Model</h2>
+      <div class="row">
+        <label>Backend
           <select id="backend">
-            <option value="ollama">Ollama runtime knobs</option>
-            <option value="llamacpp">Patched llama.cpp CLI logit hook</option>
+            <option value="llamacpp">llama.cpp (patched engine, full access to internals)</option>
+            <option value="ollama">Ollama (sampler settings only)</option>
           </select>
         </label>
-
-        <div id="ollama-fields">
-        <label>
-          Ollama model
-          <select id="model">
-            <option value="">Checking Ollama...</option>
-          </select>
+        <label>Model
+          <select id="model"></select>
         </label>
-        <button id="refresh-models" class="secondary" type="button">Refresh models</button>
+        <button id="refreshModels" type="button" class="ghost" title="Rescan models">↻</button>
+      </div>
+      <p class="hint" id="backendHint"></p>
+
+      <h2>2. Technique</h2>
+      <div id="techniques" class="technique-grid" role="radiogroup" aria-label="Technique"></div>
+      <div id="techniqueInfo" class="technique-info"></div>
+
+      <h2>3. Dose</h2>
+      <div class="dose">
+        <input id="dose" type="range" min="0" max="500" step="5" value="150" aria-label="Dose (mg)">
+        <input id="doseNumber" type="number" min="0" max="500" step="5" value="150" aria-label="Dose in mg">
+        <span>mg</span>
+      </div>
+      <div class="dose-readout"><span id="doseLabel"></span></div>
+      <svg id="curve" class="curve" viewBox="0 0 320 120" role="img" aria-label="Dose-response curve"></svg>
+      <label id="themeWrap" class="hidden">Theme words (comma separated)
+        <input id="theme" type="text" maxlength="600">
+      </label>
+
+      <h2>4. Task</h2>
+      <label>Prompt / agent objective
+        <textarea id="prompt" rows="4" maxlength="20000">Using the project notes, answer: what is the vault access code, where and when is the meeting, and who leads the project?</textarea>
+      </label>
+      <label>Context (optional, prepended to the prompt)
+        <textarea id="memory" rows="3" maxlength="20000">Project notes: the vault access code is 7391. The team meeting is in room B12 on Thursday at 3 pm. The project lead is Dana Ortiz, and the budget is 48,000 euros.</textarea>
+      </label>
+      <label>Expected answer anchor (optional, alternatives separated by |)
+        <input id="expected" type="text" maxlength="1000" value="7391">
+      </label>
+
+      <details>
+        <summary>Sampling and controls</summary>
+        <div class="grid3">
+          <label>Temperature <input id="temperature" type="number" min="0" max="2" step="0.05" value="0.7"></label>
+          <label>Top-p <input id="top_p" type="number" min="0.01" max="1" step="0.01" value="0.9"></label>
+          <label>Top-k <input id="top_k" type="number" min="0" max="1000" step="1" value="40"></label>
+          <label>Min-p <input id="min_p" type="number" min="0" max="1" step="0.01" value="0.05"></label>
+          <label>Repeat penalty <input id="repeat_penalty" type="number" min="0.5" max="2" step="0.01" value="1.05"></label>
+          <label>Max tokens <input id="max_tokens" type="number" min="8" max="4096" step="8" value="192"></label>
+          <label>Context (Ollama) <input id="num_ctx" type="number" min="256" max="131072" step="256" value="4096"></label>
+          <label>Seed <input id="seed" type="number" min="0" step="1" value="42"></label>
+          <label class="check"><input id="noiseFloor" type="checkbox" checked> Noise-floor arm</label>
         </div>
+        <label>System prompt
+          <textarea id="system" rows="2" maxlength="4000"></textarea>
+        </label>
+        <label>Blind judge (Ollama model, optional)
+          <select id="judge"><option value="">None</option></select>
+        </label>
+      </details>
 
-        <div id="llamacpp-fields" class="hidden">
-          <label>
-            Patched llama-cli.exe path
-            <input id="llama-cli-path" type="text" value="C:\Users\NHASSE\.copilot\chats\2026-09-24\supreme-succotash-6d0e4541\vendor\llama.cpp\build\bin\Release\llama-cli.exe">
-          </label>
-          <label>
-            GGUF model path
-            <input id="llama-model-path" type="text" placeholder="C:\models\your-model.gguf">
-          </label>
-          <label>
-            llama.cpp timeout per call, seconds
-            <input id="llama-timeout-seconds" type="number" min="60" max="3600" value="900">
-          </label>
-          <label>
-            llama.cpp max tokens
-            <input id="llama-max-tokens" type="number" min="16" max="2048" value="160">
-          </label>
-          <p class="status" data-tone="pending">
-            30B models can take several minutes per call because llama-cli loads the model for baseline and drugged runs.
-          </p>
+      <h2>5. Run</h2>
+      <div class="actions">
+        <button id="runTrial" type="button" class="primary">Run trial</button>
+      </div>
+      <div class="row sweep">
+        <label>Doses <input id="doses" type="text" value="0, 50, 100, 200, 350, 500"></label>
+        <label>Trials <input id="trials" type="number" min="1" max="10" value="3"></label>
+        <label class="check"><input id="reseed" type="checkbox"> Reseed engine per trial</label>
+        <button id="runSweep" type="button">Dose-response sweep</button>
+      </div>
+      <div class="row sweep">
+        <label>Agent steps <input id="steps" type="number" min="1" max="12" value="4"></label>
+        <button id="runAgent" type="button">Agent loop</button>
+      </div>
+      <div id="progress" class="progress hidden">
+        <div class="bar"><div id="progressFill"></div></div>
+        <span id="progressText"></span>
+        <button id="cancel" type="button" class="ghost">Cancel</button>
+      </div>
+      <p id="message" class="message" role="status"></p>
+    </section>
+
+    <section class="panel results" aria-label="Results">
+      <div class="results-head">
+        <h2>Results</h2>
+        <div class="actions">
+          <button id="exportJson" type="button" class="ghost" disabled>Export JSON</button>
+          <button id="exportCsv" type="button" class="ghost" disabled>Export CSV</button>
         </div>
+      </div>
+      <div id="results"><p class="empty">Run a trial to compare the untreated baseline with the treated model.</p></div>
 
-        <p id="ollama-status" class="status" data-tone="pending">Checking backend...</p>
-
-        <label>
-          Drug
-          <select id="drug"></select>
-        </label>
-        <p id="drug-summary" class="summary"></p>
-
-        <label>
-          Dose
-          <input id="dose" type="range" min="0" max="500" step="10" value="100">
-        </label>
-        <div class="dose-row">
-          <input id="dose-number" type="number" min="0" max="500" step="10" value="100">
-          <span id="dose-label"></span>
-        </div>
-
-        <label>
-          Seed
-          <input id="seed" type="text" autocomplete="off" value="lab-001">
-        </label>
-
-        <label class="check">
-          <input id="judge-enabled" type="checkbox">
-          <span>Run evaluator model after each single run</span>
-        </label>
-
-        <button id="run" type="button">Run runtime drug</button>
-        <button id="dose-response" class="secondary" type="button">Run dose response</button>
-        <button id="chaos-agent" class="secondary" type="button">Run agent chaos</button>
-      </aside>
-
-      <section class="workspace">
-        <article class="panel help-card">
-          <div class="section-title">
-            <p class="eyebrow">Use this first</p>
-            <h2>Type a prompt, click a run button, read the model outputs below.</h2>
-          </div>
-          <p>
-            The two large response boxes show exactly what the selected model returned:
-            normal 0 mg output on the left, runtime-drugged output on the right. No terminal tools are needed for normal use.
-          </p>
-        </article>
-
-        <article class="panel">
-          <div class="section-title">
-            <p class="eyebrow">Input</p>
-            <h2>Test case</h2>
-          </div>
-          <label>
-            Prompt
-            <textarea id="prompt" rows="5" placeholder="Enter the prompt to test."></textarea>
-          </label>
-          <label>
-            Expected anchor
-            <input id="expected" type="text" placeholder="Optional: required phrase, value, or comma-separated anchors">
-          </label>
-          <label>
-            Memory context
-            <textarea id="memory" rows="4" placeholder="Optional context passed identically to baseline and impaired calls."></textarea>
-          </label>
-          <label>
-            Dose list
-            <input id="doses" type="text" value="0,10,50,100,500">
-          </label>
-          <label>
-            Trials per dose
-            <input id="trials" type="number" min="1" max="5" value="1">
-          </label>
-          <label>
-            Agent objective
-            <textarea id="objective" rows="3" placeholder="Optional objective for chaos-agent mode."></textarea>
-          </label>
-        </article>
-
-        <section class="output-grid">
-          <article class="panel">
-            <div class="section-title row">
-              <div>
-                <p class="eyebrow">Actual model response</p>
-                <h2>Baseline output · 0 mg</h2>
-                <p id="baseline-meta" class="meta">No baseline call yet.</p>
-              </div>
-              <button id="copy-baseline" class="secondary compact" type="button">Copy</button>
-            </div>
-            <pre id="baseline-output">No run yet.</pre>
-          </article>
-
-          <article class="panel impaired">
-            <div class="section-title row">
-              <div>
-                <p class="eyebrow">Actual model response</p>
-                <h2>Runtime-drugged output</h2>
-                <p id="impaired-meta" class="meta">No impaired call yet.</p>
-              </div>
-              <button id="copy-impaired" class="secondary compact" type="button">Copy</button>
-            </div>
-            <pre id="impaired-output">No run yet.</pre>
-          </article>
-        </section>
-
-        <section class="output-grid">
-          <article class="panel">
-            <div class="section-title">
-              <p class="eyebrow">Measurements</p>
-              <h2>Scores</h2>
-            </div>
-            <div id="metrics" class="metrics empty">Run a test to calculate metrics.</div>
-          </article>
-
-          <article class="panel">
-            <div class="section-title">
-              <p class="eyebrow">Audit</p>
-              <h2>Runtime changes</h2>
-            </div>
-            <ul id="audit-log" class="event-log">
-              <li>Baseline and impaired messages are fingerprinted on every real run.</li>
-            </ul>
-          </article>
-        </section>
-
-        <article class="panel">
-          <div class="section-title row">
-            <div>
-              <p class="eyebrow">Dose response</p>
-              <h2>Survival curve</h2>
-            </div>
-            <strong id="dose-summary" class="survival">No batch yet.</strong>
-          </div>
-          <div id="dose-chart" class="dose-chart"></div>
-          <table>
-            <thead>
-              <tr>
-                <th>Dose</th>
-                <th>Trials</th>
-                <th>Passed</th>
-                <th>Survival</th>
-                <th>Impairment</th>
-                <th>Hallucination risk</th>
-              </tr>
-            </thead>
-            <tbody id="dose-body"></tbody>
-          </table>
-          <div id="dose-trials" class="response-list"></div>
-        </article>
-
-        <article class="panel">
-          <div class="section-title">
-            <p class="eyebrow">Agent chaos</p>
-            <h2>Multi-step degraded agent trace</h2>
-          </div>
-          <div id="agent-trace" class="trace">No agent run yet.</div>
-        </article>
-
-        <article class="panel">
-          <div class="section-title row">
-            <div>
-              <p class="eyebrow">History</p>
-              <h2>Persisted experiment log</h2>
-            </div>
-            <button id="refresh-history" class="secondary compact" type="button">Refresh history</button>
-          </div>
-          <table>
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Type</th>
-                <th>Model</th>
-                <th>Drug</th>
-                <th>Result</th>
-                <th>Actual output</th>
-              </tr>
-            </thead>
-            <tbody id="history-body"></tbody>
-          </table>
-        </article>
-      </section>
-    </main>
-
-    <script type="module" src="./app.js"></script>
-  </body>
+      <div class="results-head">
+        <h2>History</h2>
+        <button id="refreshHistory" type="button" class="ghost">Refresh</button>
+      </div>
+      <div id="history" class="history"></div>
+    </section>
+  </main>
+  <footer class="footer">
+    Techniques are named after drug classes as a mnemonic only; every intervention is a documented, deterministic
+    numerical perturbation. Weights on disk are never modified. See docs/TECHNIQUES.md.
+  </footer>
+</body>
 </html>

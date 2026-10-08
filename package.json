@@ -1,19 +1,29 @@
 {
-  "name": "llm-drugs",
-  "version": "0.1.0",
+  "name": "llm-injection-runtime-lab",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "A controlled cognitive impairment simulator for LLM behavior.",
+  "description": "Dose-controlled runtime perturbation of local LLMs (logits, attention, residual stream, FFN, KV memory) with matched controls and metrics.",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "dev": "node scripts\\serve.mjs",
-    "build": "node scripts\\build.mjs",
-    "test": "node --test test\\*.mjs"
+    "start": "node scripts/serve.mjs",
+    "dev": "node scripts/serve.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:e2e": "node --test test/e2e/*.test.mjs",
+    "experiment": "node scripts/experiment.mjs",
+    "inject-env": "node scripts/inject-env.mjs"
   },
   "keywords": [
     "llm",
-    "ai-safety",
-    "chaos-engineering",
-    "benchmarking"
+    "llama.cpp",
+    "interpretability",
+    "robustness",
+    "activation-steering",
+    "perturbation",
+    "ai-safety"
   ],
   "license": "MIT"
 }

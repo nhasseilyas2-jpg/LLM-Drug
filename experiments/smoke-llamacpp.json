@@ -1,36 +1,36 @@
 {
-    "name":  "smoke-llamacpp",
-    "description":  "Fast end-to-end check: placebo must match baseline, every other technique must diverge at 500 mg.",
-    "backend":  "llamacpp",
-    "model":  "qwen2.5-0.5b",
-    "techniques":  [
-                       "placebo",
-                       "hallucinogen",
-                       "depressant",
-                       "amnesia",
-                       "stimulant",
-                       "dissociative",
-                       "delirium",
-                       "delusion",
-                       "paranoia",
-                       "creativity"
-                   ],
-    "doses":  [
-                  0,
-                  500
-              ],
-    "trials":  1,
-    "noiseFloor":  false,
-    "sampling":  {
-                     "temperature":  0,
-                     "max_tokens":  64
-                 },
-    "seed":  7,
-    "prompts":  [
-                    {
-                        "expected":  "7391",
-                        "memory":  "Project notes: the vault access code is 7391. The team meeting is in room B12 on Thursday at 3 pm. The project lead is Dana Ortiz, and the budget is 48,000 euros.",
-                        "prompt":  "Using the project notes, answer: what is the vault access code, where and when is the meeting, and who leads the project?"
-                    }
-                ]
+  "name": "smoke-llamacpp",
+  "description": "Fast end-to-end check: placebo must match baseline, every other technique must diverge at 500 mg.",
+  "backend": "llamacpp",
+  "model": "qwen2.5-0.5b",
+  "techniques": [
+    "placebo",
+    "hallucinogen",
+    "depressant",
+    "amnesia",
+    "stimulant",
+    "dissociative",
+    "delirium",
+    "delusion",
+    "paranoia",
+    "creativity"
+  ],
+  "doses": [
+    0,
+    500
+  ],
+  "trials": 1,
+  "noiseFloor": false,
+  "sampling": {
+    "temperature": 0,
+    "max_tokens": 64
+  },
+  "seed": 7,
+  "prompts": [
+    {
+      "expected": "7391",
+      "memory": "Project notes: the vault access code is 7391. The team meeting is in room B12 on Thursday at 3 pm. The project lead is Dana Ortiz, and the budget is 48,000 euros.",
+      "prompt": "Using the project notes, answer: what is the vault access code, where and when is the meeting, and who leads the project?"
+    }
+  ]
 }

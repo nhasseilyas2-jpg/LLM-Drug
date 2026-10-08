@@ -1,0 +1,17 @@
+# Dependencies and build output
+node_modules/
+dist/
+
+# Third-party engine checkout (cloned + patched by scripts/setup-llamacpp-injection.ps1)
+vendor/
+
+# Local model weights and experiment data
+models/
+*.gguf
+data/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

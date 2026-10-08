@@ -1,0 +1,19 @@
+{
+  "name": "llm-drugs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A controlled cognitive impairment simulator for LLM behavior.",
+  "scripts": {
+    "dev": "node scripts\\serve.mjs",
+    "build": "node scripts\\build.mjs",
+    "test": "node --test test\\*.mjs"
+  },
+  "keywords": [
+    "llm",
+    "ai-safety",
+    "chaos-engineering",
+    "benchmarking"
+  ],
+  "license": "MIT"
+}

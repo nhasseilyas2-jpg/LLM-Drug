@@ -118,31 +118,37 @@ static void op_mask(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth, 
 
 struct steer_set {
     std::string                     file;
-    long long                       stamp = 0;
-    bool                            ok    = false;
+    long long                       stamp  = 0;
+    bool                            exists = false;
+    bool                            ok     = false;
     std::map<int, std::vector<float>> dirs;
 };
 
 static std::mutex                              g_steer_mutex;
 static std::vector<std::unique_ptr<steer_set>> g_steer_sets; // kept alive: pointers are used during compute
 
-static long long file_stamp(const std::string & file) {
+// modification stamp of a file; existence is reported separately because the clock epoch is
+// implementation-defined (libstdc++'s file clock makes present-day times negative)
+static bool file_stamp(const std::string & file, long long & stamp) {
     std::error_code ec;
     const auto t = std::filesystem::last_write_time(std::filesystem::u8path(file), ec);
     if (ec) {
-        return -1;
+        stamp = 0;
+        return false;
     }
     const auto size = std::filesystem::file_size(std::filesystem::u8path(file), ec);
-    return (long long) t.time_since_epoch().count() ^ (long long) (ec ? 0 : size);
+    stamp = (long long) t.time_since_epoch().count() ^ (long long) (ec ? 0 : size);
+    return true;
 }
 
-static std::unique_ptr<steer_set> load_steer(const std::string & file, long long stamp) {
-    auto set   = std::make_unique<steer_set>();
-    set->file  = file;
-    set->stamp = stamp;
+static std::unique_ptr<steer_set> load_steer(const std::string & file, long long stamp, bool exists) {
+    auto set    = std::make_unique<steer_set>();
+    set->file   = file;
+    set->stamp  = stamp;
+    set->exists = exists;
     ggml_context * meta = nullptr;
     gguf_init_params params = { /*no_alloc =*/ false, /*ctx =*/ &meta };
-    gguf_context * g = stamp >= 0 ? gguf_init_from_file(file.c_str(), params) : nullptr;
+    gguf_context * g = exists ? gguf_init_from_file(file.c_str(), params) : nullptr;
     if (g == nullptr) {
         return set;
     }
@@ -190,10 +196,11 @@ static const std::vector<float> * steer_lookup(const std::string & file, int il,
         const auto it = last->dirs.find(il);
         return it == last->dirs.end() ? nullptr : &it->second;
     }
-    const long long stamp = file_stamp(file);
+    long long stamp = 0;
+    const bool exists = file_stamp(file, stamp);
     steer_set * cur = last;
-    if (cur == nullptr || cur->stamp != stamp) {
-        g_steer_sets.push_back(load_steer(file, stamp));
+    if (cur == nullptr || cur->exists != exists || cur->stamp != stamp) {
+        g_steer_sets.push_back(load_steer(file, stamp, exists));
         cur = g_steer_sets.back().get();
     }
     const auto it = cur->dirs.find(il);
